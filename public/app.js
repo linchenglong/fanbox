@@ -2114,7 +2114,8 @@ function renderSessionNav() {
     label.title = `${pj.path}\n${agoShort(pj.lastActive)}前活跃 · 单击把「＋ 终端」的落点切到这里`;
     const when = document.createElement('span');
     when.className = 'when';
-    when.append(`${pj.sessions.length} 个会话`);
+    when.title = `${pj.sessions.length} 个会话`;
+    when.append(String(pj.sessions.length));
     const add = document.createElement('span');
     add.className = 'proj-add';
     add.textContent = '＋';
