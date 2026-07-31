@@ -42,6 +42,7 @@ grep -n "==== 二开" server.js public/app.js public/style.css electron/main.js 
 - `npm run dist` 走不通：package.json 写死原作者签名证书（`identity`/`notarize`），本地打包前必须改掉
 - 上游 README/CHANGELOG 不要改（月更多次必冲突），二开叙事一律写 docs/FORK.md
 - 开发实例带 CDP 调试：`npx electron . --remote-debugging-port=9223`；kill npx 包装进程杀不掉 Electron 本体，要 `lsof -nP -iTCP:4567 -sTCP:LISTEN -t | xargs kill`
+- **PTY spawn 必须清 CLAUDECODE 等污染环境变量**（electron/main.js `pty:spawn` 已做）。FanBox 若跑在 claude 会话里（Agent 驱动开发），process.env 带 `CLAUDECODE`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_ENTRYPOINT`/`CLAUDE_CODE_EXECPATH`，终端 PTY 继承后里面起的 claude 会以为自己是父会话的子 agent，**不往自己 session 的 jsonl 写对话**（只写 mode 元信息）→ 对话内容丢失、`claudex -r <id>` 找不到会话。经验源自 warp自定义/CLAUDE.md「☠️ 启动 GUI 必须清环境变量」节
 
 ## 验证习惯
 
