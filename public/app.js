@@ -2184,6 +2184,7 @@ function sessLi(pj, s) {
 // 不真的敲 `cd`——pty spawn 时 cwd 就是项目目录，效果等价且不脏 shell 历史。
 async function openSession(projPath, sessId) {
   if (!term.available()) { toast('内嵌终端不可用（网页版）——请用桌面 App 打开会话', true); return; }
+  // ① 前端自己标记过的 tab（点侧栏开出来的）
   const live = term.sessions.find((s) => !s.dead && s.claudeSessionId === sessId);
   if (live) {
     if ($('#terminal-panel').classList.contains('hidden')) term.open();
@@ -2191,6 +2192,28 @@ async function openSession(projPath, sessId) {
     live.xterm.focus();
     return;
   }
+  // ② 前端没标记但会话确实开着（手动在 FanBox 终端敲 claudex 起的 / 外部宿主跑的）：
+  //    问服务端它跑在哪——FANBOX_TERM_ID 配对到本地 tab 就切过去并补标记；外部宿主则提示，
+  //    绝不再开一个 tab 双开（claude -r 双开会写坏 jsonl，见 warp自定义/BLOCKED.md）
+  try {
+    const h = await api('/api/session-host?id=' + encodeURIComponent(sessId));
+    if (h && h.open) {
+      if (h.termId) {
+        const s = term.sessions.find((x) => !x.dead && x.id === h.termId);
+        if (s) {
+          s.claudeSessionId = sessId; // 补标记，下次点击走 ① 不再询问
+          s.claudeProj = projPath;
+          if ($('#terminal-panel').classList.contains('hidden')) term.open();
+          term.activate(s.id);
+          s.xterm.focus();
+          refreshSessionOpenState();
+          return;
+        }
+      }
+      toast('这个会话正在别的终端（iTerm/Warp 等）里运行——别双开，会写坏会话记录', true);
+      return;
+    }
+  } catch { /* 服务端查不到就按未打开走，最多是旧行为 */ }
   const sess = await term.openInDir(projPath);
   if (!sess || sess.dead) return;
   sess.claudeSessionId = sessId;
@@ -2847,6 +2870,11 @@ const agentsPop = {
         <input type="range" class="ap-bg-mask" min="0" max="95" step="5" value="${term.bgMask()}" title="蒙版深浅">
         <button class="ghost-btn ap-bg-clear"${term.bgImage() ? '' : ' disabled'}>清除</button>
       </div>
+      <div class="ap-row ap-font ap-scroll" title="滚轮一格滚多少行的倍率（基准 2 行/格）：3 倍≈6 行，10 倍≈20 行。改完对所有终端标签立即生效；按住 Alt 滚再快 5 倍">
+        <span class="ap-name">滚速</span>
+        <input type="range" class="ap-scroll-sens" min="1" max="15" step="1" value="${Number(localStorage.getItem('fb_term_scroll')) || 3}">
+        <span class="ap-scroll-val">${Number(localStorage.getItem('fb_term_scroll')) || 3}x</span>
+      </div>
       <div class="ap-head ap-sub">Agent 互控</div>
       <div class="ap-row" title="装进 ~/.claude/skills 后，翻箱终端里的 claude 就能指挥兄弟窗口：新开窗口 / 读输出 / 发指令 / 等结果">
         <span class="ap-name">fanbox-agent skill</span>
@@ -2883,6 +2911,16 @@ const agentsPop = {
       };
       bgMask.oninput = () => { term.setBg(undefined, Number(bgMask.value)); };
       bgClear.onclick = () => { term.setBg('', undefined); bgPick.textContent = '选图'; bgClear.disabled = true; toast('已恢复纯色背景'); };
+    }
+    // ==== 二开: 滚轮速度（拖动即生效，作用于所有已开 tab——xterm options 运行时可改）====
+    const scrollIn = pop.querySelector('.ap-scroll-sens'), scrollVal = pop.querySelector('.ap-scroll-val');
+    if (scrollIn && scrollVal) {
+      scrollIn.oninput = () => {
+        const v = Math.max(1, Math.min(15, Number(scrollIn.value) || 3));
+        scrollVal.textContent = v + 'x';
+        localStorage.setItem('fb_term_scroll', String(v));
+        term.sessions.forEach((s) => { try { s.xterm.options.scrollSensitivity = v; } catch { /* */ } });
+      };
     }
     pop.querySelectorAll('.ap-list .ap-row input').forEach((cb) => {
       cb.onchange = async () => {

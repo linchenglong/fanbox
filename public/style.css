@@ -1478,3 +1478,6 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .agents-pop .ap-bg .ap-bg-mask { flex: 1; min-width: 0; padding: 0; accent-color: var(--accent); border: none; background: transparent; }
 .agents-pop .ap-bg .ghost-btn { font-size: 12px; padding: 3px 9px; }
 .agents-pop .ap-bg .ghost-btn:disabled { opacity: 0.4; cursor: default; }
+/* 设置面板 · 滚轮速度行 */
+.agents-pop .ap-scroll .ap-scroll-sens { flex: 1; min-width: 0; padding: 0; accent-color: var(--accent); border: none; background: transparent; }
+.agents-pop .ap-scroll .ap-scroll-val { flex-shrink: 0; width: 30px; text-align: right; font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }

@@ -778,6 +778,30 @@ async function liveClaudeSessionIds() {
   return ids;
 }
 
+// ==== 二开: cockpit —— 某个活会话跑在哪：FanBox 终端 id 或外部宿主 ====
+// 点击已打开的 session 时前端要「切换到对应 tab」而不是再开一个。前端只认自己标记过的 tab，
+// 手动在 FanBox 终端里敲 claudex 起的会话没有标记——靠 ps eww 读 claude 进程环境里的
+// FANBOX_TERM_ID（pty:spawn 注入的）来配对；读不到 = 会话在 iTerm/Warp 等外部宿主跑。
+async function sessionHost(sessId) {
+  let pid = 0;
+  try {
+    for (const n of await fsp.readdir(CLAUDE_SESS_REG)) {
+      if (!n.endsWith('.json')) continue;
+      try {
+        const j = JSON.parse(await fsp.readFile(path.join(CLAUDE_SESS_REG, n), 'utf8'));
+        if (j && j.sessionId === sessId && j.pid) { pid = Number(j.pid); break; }
+      } catch { /* */ }
+    }
+  } catch { /* */ }
+  if (!pid) return { ok: true, open: false, termId: null };
+  const envLine = await new Promise((resolve) => {
+    execFile('ps', ['eww', '-o', 'command=', '-p', String(pid)], { timeout: 3000 }, (err, out) => resolve(err ? '' : String(out || '')));
+  });
+  if (!envLine) return { ok: true, open: false, termId: null }; // 进程已死（stale 注册表）
+  const m = envLine.match(/FANBOX_TERM_ID=(\w+)/);
+  return { ok: true, open: true, termId: m ? m[1] : null }; // termId=null → 外部宿主（iTerm/Warp 等）
+}
+
 // ==== 二开: cockpit —— 四态判定（纯函数，不改缓存）====
 // running    进行中：最后一轮是工具调用/工具结果，且 jsonl 在活跃窗口内仍有写入（防被中断的僵尸蓝点）
 // waiting    等待确认：最后一轮停在 AskUserQuestion（其后无任何回答/新对话）
@@ -2854,6 +2878,9 @@ const server = http.createServer(async (req, res) => {
     // ==== 二开: cockpit ====
     if (p === '/api/agent-sessions') {
       return sendJSON(res, 200, await agentSessions());
+    }
+    if (p === '/api/session-host') {
+      return sendJSON(res, 200, await sessionHost(qp.get('id') || ''));
     }
     if (p === '/api/session-name' && req.method === 'POST') {
       const b = await readBody(req);
