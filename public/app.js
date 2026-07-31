@@ -2114,8 +2114,13 @@ function renderSessionNav() {
     label.title = `${pj.path}\n${agoShort(pj.lastActive)}前活跃 · 单击把「＋ 终端」的落点切到这里`;
     const when = document.createElement('span');
     when.className = 'when';
-    when.append(agoShort(pj.lastActive));
-    li.append(twirl, ico, label, when);
+    when.append(`${pj.sessions.length} 个会话`);
+    const add = document.createElement('span');
+    add.className = 'proj-add';
+    add.textContent = '＋';
+    add.title = `在 ${pj.name} 开一个全新的 Claude 会话`;
+    add.onclick = (ev) => { ev.stopPropagation(); launchNewSession(pj.path); };
+    li.append(twirl, ico, label, when, add);
     li.onclick = () => navigate(pj.path); // 选中项目：⌘K / ＋ 终端 都落在这个目录
     makeDraggablePath(li, pj.path);
     ul.appendChild(li);
@@ -2135,27 +2140,31 @@ function renderSessionNav() {
       };
       sub.appendChild(more);
     }
-    const add = document.createElement('li');
-    add.className = 'sess-new';
-    add.innerHTML = '<span class="sess-plus">＋</span> 新会话';
-    add.title = `在 ${pj.name} 开一个全新的 Claude 会话`;
-    add.onclick = () => launchNewSession(pj.path);
-    sub.appendChild(add);
     ul.appendChild(sub);
   });
   renderRootsActive(); // 重渲后补一次高亮，让「当前所在的 agent 项目」保持选中态
 }
 
+// 四态圆点：进行中(蓝/呼吸) · 等待确认(橙) · 后台运行(紫) · 执行完成(绿)。
+// 状态由服务端读 jsonl 判定，与终端无关——在 iTerm 里跑的会话照样显示状态
+const SESS_STATUS = {
+  running: { label: '进行中', cls: 'st-running' },
+  waiting: { label: '等待确认', cls: 'st-waiting' },
+  background: { label: '后台运行', cls: 'st-background' },
+  done: { label: '执行完成', cls: 'st-done' },
+};
 function sessLi(pj, s) {
   const li = document.createElement('li');
   li.className = 'sess-li sess-closed';
   li.dataset.sid = s.id;
+  const stInfo = SESS_STATUS[s.status] || SESS_STATUS.done;
   const dot = document.createElement('span');
-  dot.className = 'sess-dot';
+  dot.className = 'sess-dot ' + stInfo.cls;
+  dot.title = stInfo.label;
   const label = document.createElement('span');
   label.className = 'label';
   label.textContent = s.name || s.title || '（无标题会话）';
-  li.title = `${s.title || '（无标题会话）'}\n${fmtTime(s.lastT)}${s.userMsgs ? ` · ${s.userMsgs} 条消息` : ''}\n单击：打开 / 切换到这个会话`;
+  li.title = `${stInfo.label} · ${s.title || '（无标题会话）'}\n${fmtTime(s.lastT)}${s.userMsgs ? ` · ${s.userMsgs} 条消息` : ''}\n单击：打开 / 切换到这个会话`;
   const edit = document.createElement('span');
   edit.className = 'sess-edit';
   edit.textContent = '✎';
@@ -5632,8 +5641,9 @@ async function init() {
   verInfo.init();
   cronPanel.syncBadge();
   loadAgentProjects();
-  setInterval(loadAgentProjects, 120000); // agent 项目入口保持新鲜（服务端有 60s 缓存，开销很小）
-  setInterval(checkSessionTabsAlive, 20000); // ==== 二开: cockpit ==== claude 退出 → session 及时变灰（每 tab 一次 pty:proc IPC，很轻）
+  // ==== 二开: cockpit ==== 15s 轮询让状态圆点跟得上（parse 有 size+mtime 缓存，没新写入时只是一圈 stat）
+  setInterval(loadAgentProjects, 15000);
+  setInterval(checkSessionTabsAlive, 20000); // claude 退出 → session 及时变灰（每 tab 一次 pty:proc IPC，很轻）
   // 回到上次浏览的目录（目录已不存在则退回主目录）
   const lastDir = localStorage.getItem('fb_last_cwd');
   await navigate(lastDir || state.home, false);

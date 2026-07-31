@@ -658,15 +658,47 @@ const mungeClaudeDir = (cwd) => cwd.replace(/[^A-Za-z0-9]/g, '-');
 async function parseClaudeSession(fp, st) {
   const hit = projMemCache.get(fp);
   if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.sess;
-  const sess = { id: path.basename(fp, '.jsonl'), agent: 'claude', title: '', firstT: 0, lastT: st.mtimeMs, userMsgs: 0, files: [], skills: [] };
-  const filesSet = new Set(), skillsSet = new Set();
+  const sess = { id: path.basename(fp, '.jsonl'), agent: 'claude', title: '', firstT: 0, lastT: st.mtimeMs, userMsgs: 0, files: [], skills: [], lastSignal: '', bg: [] };
+  const filesSet = new Set(), skillsSet = new Set(), bgNotified = new Set();
   // 流式逐行，廉价字符串预判后才 JSON.parse——大会话文件也不整读进内存
   const stream = fs.createReadStream(fp, { encoding: 'utf8' });
   let rest = '';
+  const lineT = (line) => { const m = line.match(/"timestamp":"([^"]+)"/); return m ? (Date.parse(m[1]) || 0) : 0; };
   const handleLine = (line) => {
     if (!sess.firstT) {
       const m = line.match(/"timestamp":"([^"]+)"/);
       if (m) sess.firstT = Date.parse(m[1]) || 0;
+    }
+    // ==== 二开: cockpit —— 四态判定的三个标量（lastSignal / bg 句柄栈 / 通知回收）====
+    // sidechain（subagent 内部消息）不参与：它的收尾不代表主对话的收尾
+    if (!line.includes('"isSidechain":true')) {
+      if (line.includes('"type":"assistant"')) {
+        if (line.includes('"type":"tool_use"')) {
+          try {
+            const d = JSON.parse(line);
+            const content = d.message && Array.isArray(d.message.content) ? d.message.content : [];
+            const tools = content.filter((x) => x.type === 'tool_use');
+            if (tools.length) {
+              sess.lastSignal = tools.some((x) => x.name === 'AskUserQuestion') ? 'ask' : 'tool';
+              const t = lineT(line) || st.mtimeMs;
+              for (const x of tools) {
+                // 后台句柄：Monitor 按自身 timeout 回收；bg Bash / bg Agent 靠通知或 3h 窗口兜底
+                if (x.name === 'Monitor') sess.bg.push({ t, timeoutMs: Number(x.input && x.input.timeout_ms) || 0 });
+                else if ((x.name === 'Bash' || x.name === 'Agent') && x.input && x.input.run_in_background === true) sess.bg.push({ t, timeoutMs: 0 });
+              }
+            } else if (content.some((x) => x.type === 'text')) sess.lastSignal = 'other';
+          } catch { sess.lastSignal = 'tool'; /* 解析失败按最常见形态算 */ }
+        } else if (line.includes('"type":"text"')) sess.lastSignal = 'other'; // 回合以纯文字收尾
+      } else if (line.includes('"type":"user"') && !line.includes('"isMeta":true')) {
+        // 工具结果回来 = agent 还在干；真人输入 = 回答了 ask / 新一轮开始
+        sess.lastSignal = line.includes('"tool_use_id"') ? 'tool' : 'other';
+      }
+      if (line.includes('task-notification')) {
+        // 同一条通知会出现在 enqueue / 消费 等多行——按 task-id 去重，一条通知只回收一个句柄
+        const m = line.match(/<task-id>([^<]+)<\/task-id>/);
+        const key = m ? m[1] : 'line-' + lineT(line);
+        if (!bgNotified.has(key)) { bgNotified.add(key); sess.bg.shift(); }
+      }
     }
     if (line.includes('"type":"user"') && !line.includes('"isMeta":true') && !line.includes('"tool_use_id"')) {
       sess.userMsgs++;
@@ -710,8 +742,22 @@ async function parseClaudeSession(fp, st) {
   if (rest.trim()) handleLine(rest);
   sess.files = [...filesSet].slice(0, 80);
   sess.skills = [...skillsSet].slice(0, 20);
+  sess.bg = sess.bg.slice(-20); // 未回收句柄封顶：3h 窗口外的在判定时自然失效，缓存里不用留几百个
   projMemCache.set(fp, { size: st.size, mtimeMs: st.mtimeMs, sess });
   return sess;
+}
+
+// ==== 二开: cockpit —— 四态判定（纯函数，不改缓存）====
+// running    进行中：最后一轮是工具调用/工具结果，且 jsonl 在活跃窗口内仍有写入（防被中断的僵尸蓝点）
+// waiting    等待确认：最后一轮停在 AskUserQuestion（其后无任何回答/新对话）
+// background 后台运行：有未回收的后台句柄（Monitor 按 timeout+30s 提前失效，其余 3h 窗口兜底）
+// done       执行完成：以上都不是
+const SESS_BG_WINDOW = 3 * 3600 * 1000;
+function decideSessionStatus(sess, activeWindowMs, now = Date.now()) {
+  if (sess.lastSignal === 'tool' && now - sess.lastT < activeWindowMs) return 'running';
+  if (sess.lastSignal === 'ask') return 'waiting';
+  if ((sess.bg || []).some((h) => now - h.t < SESS_BG_WINDOW && (!h.timeoutMs || now < h.t + h.timeoutMs + 30000))) return 'background';
+  return 'done';
 }
 
 async function parseCodexSession(fp, st) {
@@ -1949,6 +1995,8 @@ const SESS_NEW_DEFAULT = 'claudex';
 async function agentSessions() {
   const [projData, cfg] = await Promise.all([agentProjects(), readConfig()]);
   const names = cfg.sessionNames || {};
+  const activeWindowMs = Number(cfg.sessionActiveWindowMs) || 60000;
+  const now = Date.now();
   const projects = [];
   await Promise.all((projData.projects || []).map(async (pj) => {
     const dir = path.join(CLAUDE_PROJ, mungeClaudeDir(pj.path));
@@ -1965,7 +2013,7 @@ async function agentSessions() {
         const s = await parseClaudeSession(f.fp, f.st);
         // 空会话（无人打过字、也没标题）多半是探测/崩溃残留，列出来只添乱
         if (!s.title && !s.userMsgs) continue;
-        sessions.push({ id: s.id, title: s.title, name: names[s.id] || '', lastT: s.lastT, userMsgs: s.userMsgs });
+        sessions.push({ id: s.id, title: s.title, name: names[s.id] || '', lastT: s.lastT, userMsgs: s.userMsgs, status: decideSessionStatus(s, activeWindowMs, now) });
       } catch { /* 单文件解析失败不拖累整个项目 */ }
     }
     if (!sessions.length) return;
@@ -1977,6 +2025,7 @@ async function agentSessions() {
     ok: true,
     resumeCmd: cfg.sessionResumeCmd || SESS_RESUME_DEFAULT,
     newCmd: cfg.sessionNewCmd || SESS_NEW_DEFAULT,
+    activeWindowMs,
     projects,
   };
 }
