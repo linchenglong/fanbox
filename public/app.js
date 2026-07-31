@@ -3691,8 +3691,18 @@ const term = {
     if (!r) return;
     if (r.kind === 'text') { xterm.paste(r.text); return; }
     if (r.kind === 'image' || r.kind === 'file') {
-      this.insertPath(r.path);
-      if (r.kind === 'image') toast('剪贴板图片已存成文件，路径已插入终端');
+      // ==== 二开: 图片粘贴贴近 Warp 的 [image] 观感 ====
+      // 落盘路径已由主进程桥准备好；喂给 claude 的是「路径整行」——交互式 TUI 看到路径会调 Read 读图。
+      // 回显带 [image] 前缀让用户一眼知道这是张图、不是误粘的文字路径（claude TUI 里 [image N] 是 Warp 私有协议，
+      // 真·claude CLI 复刻不了，这里取观感、用 claude 认的路径引用）
+      const s = this.sessions.find((x) => x.id === this.active);
+      if (s && !s.dead) {
+        this.input(s.id, (r.kind === 'image' ? '[image] ' : '') + r.path + ' ');
+        s.xterm.focus();
+        toast(r.kind === 'image' ? '图片已存盘，路径已喂给 agent' : '文件路径已插入终端');
+      } else {
+        toast('先开一个终端再粘贴', true);
+      }
       return;
     }
     if (r.kind === 'error') toast('读剪贴板失败：' + (r.error || ''), true);
@@ -3939,6 +3949,13 @@ const term = {
         // ⌘V 粘贴：文字/图片/文件都收（图片和文件落成路径）
         e.preventDefault();
         term.pasteInto(xterm);
+        return false;
+      }
+      // ==== 二开: ⌘+Enter / Shift+Enter 换行（claude TUI 默认 Enter 是提交）====
+      // 发送 ESC+CR（=Option+Enter 在 iTerm/VS Code 里的等价序列），claude 收到后换行不提交
+      if ((e.metaKey || e.shiftKey) && (e.key === 'Enter' || e.key === 'Return')) {
+        e.preventDefault();
+        term.input(sess.id, '\x1b\r');
         return false;
       }
       if (cmd && (e.key === '=' || e.key === '+' || e.key === '0')) {

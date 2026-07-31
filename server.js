@@ -1956,6 +1956,33 @@ async function readCwdFromHead(file, bytes) {
   } finally { await fh.close(); }
 }
 
+// ==== 二开: cockpit —— 目录名反解 cwd 兜底 ====
+// claude 的 munge 是 cwd.replace(/[^A-Za-z0-9]/g, '-')，目录名里 '/' 和 '-' 都被压成 '-'，
+// 反解不唯一（~/work/Claude/work 与 ~/work/Claude-work 同名）。靠 stat 验证存在性筛掉错候选。
+// 策略：从根开始逐段贪心——每个路径段从最短试到最长（段名本身可能含 '-'），找到存在的就认，继续拼下一段。
+// 取不到下一段就回溯换更长的当前段。这条路径最可能是 claude 写入时的真实 cwd。
+async function cwdFromDirName(dirName) {
+  if (!dirName || dirName === '-') return null;
+  const toks = dirName.split('-'); // 含空串（首尾的 - 产生），下面用索引游走
+  // 回溯搜索：pos=已消费到第几个 token，path=已拼出的真实路径
+  const trySolve = async (pos, path) => {
+    if (pos >= toks.length) return path; // 全消费完
+    // 跳过空 token（首尾的 -）
+    if (toks[pos] === '') return trySolve(pos + 1, path);
+    // 从最长候选段开始试（贪心长段优先：路径段越完整越可能是真的）
+    for (let end = toks.length; end > pos; end--) {
+      const seg = toks.slice(pos, end).join('-');
+      if (!seg) continue;
+      const cand = path + '/' + seg;
+      try { if (!(await fsp.stat(cand)).isDirectory()) continue; } catch { continue; }
+      const r = await trySolve(end, cand);
+      if (r) return r;
+    }
+    return null;
+  };
+  return trySolve(0, '');
+}
+
 async function agentProjects(force = false) {
   if (!force && agentProjCache.data && Date.now() - agentProjCache.at < 60000) return agentProjCache.data;
   const cutoff = Date.now() - 30 * 86400000;
@@ -1981,7 +2008,13 @@ async function agentProjects(force = false) {
         } catch { /* */ }
       }));
       if (!newest || newest.mtimeMs < cutoff) return;
-      try { add(await readCwdFromHead(newest.fp, 65536), newest.mtimeMs, 'claude'); } catch { /* */ }
+      try {
+        // ==== 二开: cockpit ==== cwd 从文件头抓不到（前 64KB 没 cwd 行）时，从目录名反解兜底，
+        // 避免 work 这种「最新 jsonl 头部全是 thinking/tool_use」的项目整条丢失
+        let cwd = await readCwdFromHead(newest.fp, 65536);
+        if (!cwd) cwd = await cwdFromDirName(d);
+        add(cwd, newest.mtimeMs, 'claude');
+      } catch { /* */ }
     }));
   } catch { /* 没用过 Claude Code */ }
   // Codex：最近改动的 rollout 文件头部抓 cwd（数量封顶，控制 IO）
