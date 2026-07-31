@@ -59,6 +59,13 @@
 - **皮肤垫图**：设置面板「皮肤」行——系统对话框选图（electron `ui:pick-image` 桥）+ 半透明黑蒙版滑杆（0–95%，默认 60%）+ 清除。有图时 xterm 画布走透明（`allowTransparency`），图/蒙版由 `#xterm-host` CSS 承担
 - **侧栏文字提亮**：条目一律主文字色，仅未打开会话置灰（8bab389, 2f0b54c）
 
+### 7. Patch 修复（ef71aea, c610306）
+
+- **图片粘贴观感**：`pasteInto` 图片分支回显 `[image] <path>`（贴近 Warp 的 `[image N]` 标记，但 claude TUI 不认 Warp 私有协议，改用 claude 能读的路径引用——交互式 TUI 看到路径会调 Read 读图）。`@路径` 在 `-p` 模式不解析、stream-json 仅 `-p` 可用，无法直接复刻 Warp
+- **⌘+Enter / Shift+Enter 换行**：`attachCustomKeyEventHandler` 拦截后发 `ESC+CR`（=Option+Enter 等价序列），claude TUI 换行不提交；裸 Enter 仍提交
+- **work 项目丢失修复**：上游 `agentProjects` 老 bug——最新 jsonl 头 64KB 抓不到 `cwd` 字段就整个项目丢弃。新增 `cwdFromDirName`：从 munge 后的目录名拆 `-` 贪心匹配 + stat 验证还原真实路径（路径段含 `-` 时有歧义，stat 筛选错候选）
+- **PTY 清污染环境变量**（重要）：FanBox 若跑在 claude 会话里（Agent 驱动开发），`process.env` 带 `CLAUDECODE`/`CLAUDE_CODE_SESSION_ID` 等，终端 PTY 继承后里面起的 claude 以为自己是父会话子 agent，**不往自己 session 的 jsonl 写对话** → 内容丢失、`claudex -r <id>` 找不到。`pty:spawn` 前 `delete` 四个变量。经验源自 warp自定义/CLAUDE.md
+
 ## 已知限制
 
 - TUI（claude/codex）接管鼠标上报时，滚轮步长由程序自己决定，灵敏度设置不生效（终端协议使然，Warp 同）
