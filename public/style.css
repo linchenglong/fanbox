@@ -1460,9 +1460,11 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .sess-li .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sess-li.sess-closed { color: var(--text-faint); }
 .sess-li.sess-open { color: var(--text); font-weight: 600; }
-.sess-li .sess-edit { margin-left: auto; flex-shrink: 0; opacity: 0; font-size: 11px; padding: 0 2px; border-radius: 3px; }
+.sess-li .sess-edit { margin-left: auto; flex-shrink: 0; opacity: 0; font-size: 13px; line-height: 1; padding: 0 3px; border-radius: 3px; }
 .sess-li:hover .sess-edit { opacity: 0.6; }
 .sess-li .sess-edit:hover { opacity: 1; color: var(--accent); background: var(--bg-3); }
+.sess-li .sess-pin { margin-left: auto; flex-shrink: 0; font-size: 9px; opacity: 0.75; }
+.sess-li .sess-pin + .sess-edit { margin-left: 2px; }
 
 /* 折叠展开动作行 */
 .sess-more { color: var(--text-faint); font-size: 11.5px; }

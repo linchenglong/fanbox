@@ -2050,7 +2050,26 @@ const sessUI = {
   showAll: new Set(),    // 点过「还有 N 个」的项目
   collapsed: new Set(),  // 收起了整个会话列表的项目
   MAX: 5,                // 默认最多露出的 session 数
+  // 置顶集合存 localStorage（不走服务端 config：改动即刷新生效，无需重启 App）
+  pinned: new Set(JSON.parse(localStorage.getItem('fb_sess_pinned') || '[]')),
+  savePinned() { localStorage.setItem('fb_sess_pinned', JSON.stringify([...this.pinned])); },
 };
+// session 的展示名：自定义名 > 首条消息摘要 > 兜底
+const sessDisplayName = (s) => s.name || s.title || '（无标题会话）';
+// 挂了 claude 会话的 tab，标题跟随会话名（截短防挤爆 tab 栏）；改名/收养/自动命名后调用
+function syncSessTabTitles() {
+  const byId = new Map();
+  sessUI.projects.forEach((p) => p.sessions.forEach((s) => byId.set(s.id, s)));
+  let changed = false;
+  term.sessions.forEach((t) => {
+    if (t.dead || !t.claudeSessionId) return;
+    const s = byId.get(t.claudeSessionId);
+    if (!s) return;
+    const want = sessDisplayName(s).slice(0, 14);
+    if (t.title !== want) { t.title = want; changed = true; }
+  });
+  if (changed) term.renderTabs();
+}
 
 function sessionOpenIds() {
   const ids = new Set();
@@ -2077,10 +2096,13 @@ async function loadAgentProjects() {
   sessUI.resumeCmd = data.resumeCmd || sessUI.resumeCmd;
   sessUI.newCmd = data.newCmd || sessUI.newCmd;
   sessUI.projects = data.projects || [];
+  // 置顶的排到各自项目最前（组内仍按 lastT 降序——服务端已排好，stable sort 保序）
+  sessUI.projects.forEach((p) => p.sessions.sort((a, b) => (sessUI.pinned.has(b.id) ? 1 : 0) - (sessUI.pinned.has(a.id) ? 1 : 0)));
   adoptLiveSessions();
   checkSessionTabsAlive(); // 异步不 await：结果出来自己补高亮
+  syncSessTabTitles(); // tab 标题跟随会话名（含 AI 自动命名的更新）
   // 数据没变就不动 DOM，免得定时刷新抹掉用户的展开状态
-  const sig = JSON.stringify(sessUI.projects);
+  const sig = JSON.stringify(sessUI.projects) + [...sessUI.pinned].join();
   if (sig !== loadAgentProjects._sig) {
     loadAgentProjects._sig = sig;
     renderSessionNav();
@@ -2168,16 +2190,41 @@ function sessLi(pj, s) {
   dot.title = stInfo ? stInfo.label : '未打开';
   const label = document.createElement('span');
   label.className = 'label';
-  label.textContent = s.name || s.title || '（无标题会话）';
+  label.textContent = sessDisplayName(s);
+  const pinned = sessUI.pinned.has(s.id);
   li.title = `${stInfo ? stInfo.label + ' · ' : ''}${s.title || '（无标题会话）'}\n${fmtTime(s.lastT)}${s.userMsgs ? ` · ${s.userMsgs} 条消息` : ''}\n单击：打开 / 切换到这个会话`;
-  const edit = document.createElement('span');
-  edit.className = 'sess-edit';
-  edit.textContent = '✎';
-  edit.title = '重命名';
-  edit.onclick = (ev) => { ev.stopPropagation(); renameSession(pj, s); };
-  li.append(dot, label, edit);
+  const more = document.createElement('span');
+  more.className = 'sess-edit';
+  more.textContent = '⋯';
+  more.title = '重命名 / 置顶';
+  more.onclick = (ev) => {
+    ev.stopPropagation();
+    popupMenu(ev, [
+      { label: '重命名…', fn: () => renameSession(pj, s) },
+      { label: pinned ? '取消置顶' : '置顶', fn: () => togglePinSession(s.id) },
+    ]);
+  };
+  if (pinned) {
+    const pin = document.createElement('span');
+    pin.className = 'sess-pin';
+    pin.textContent = '📌';
+    pin.title = '已置顶';
+    li.append(dot, label, pin, more);
+  } else {
+    li.append(dot, label, more);
+  }
   li.onclick = () => openSession(pj.path, s.id);
   return li;
+}
+
+// 置顶/取消置顶：存 localStorage，排序在 loadAgentProjects 里做（置顶组排最前，组内按活跃降序）
+function togglePinSession(sessId) {
+  if (sessUI.pinned.has(sessId)) sessUI.pinned.delete(sessId); else sessUI.pinned.add(sessId);
+  sessUI.savePinned();
+  sessUI.projects.forEach((p) => p.sessions.sort((a, b) => (sessUI.pinned.has(b.id) ? 1 : 0) - (sessUI.pinned.has(a.id) ? 1 : 0)));
+  loadAgentProjects._sig = null;
+  renderSessionNav();
+  refreshSessionOpenState();
 }
 
 // 点击 session：已有活 tab → 切换；否则在项目目录开 tab、自动跑续接命令。
@@ -2206,6 +2253,7 @@ async function openSession(projPath, sessId) {
           if ($('#terminal-panel').classList.contains('hidden')) term.open();
           term.activate(s.id);
           s.xterm.focus();
+          syncSessTabTitles(); // tab 标题换成会话名
           refreshSessionOpenState();
           return;
         }
@@ -2221,6 +2269,7 @@ async function openSession(projPath, sessId) {
   sess.sessSpawnT = Date.now();
   term.input(sess.id, sessUI.resumeCmd.replace('{id}', sessId) + '\r');
   sess.xterm.focus();
+  syncSessTabTitles(); // tab 标题立即换成会话名
   refreshSessionOpenState();
   scheduleSessRefresh();
 }
@@ -2248,6 +2297,7 @@ async function renameSession(pj, s) {
   loadAgentProjects._sig = null; // 数据变了，强制重渲
   renderSessionNav();
   refreshSessionOpenState();
+  syncSessTabTitles(); // 改名同步到 tab 标题
 }
 
 // resume 在部分版本会把续写落到「新 session id」的 jsonl（fork）；「＋ 新会话」的 tab 一开始也没有 id。
@@ -2268,6 +2318,7 @@ function adoptLiveSessions() {
       claimed.add(cand.id);
     }
   });
+  syncSessTabTitles(); // 收养后 tab 标题跟上会话名
 }
 
 // claude 退出回到裸 shell → 摘标签，session 变灰。刚开的 tab 给 15s 宽限（claudex 可能还没起来）
@@ -2277,10 +2328,13 @@ async function checkSessionTabsAlive() {
     if (t.dead || (!t.claudeSessionId && !t.claudeProj)) continue;
     if (Date.now() - (t.sessSpawnT || 0) < 15000) continue;
     try {
-      if (await term.isPlainShell(t)) { t.claudeSessionId = null; t.claudeProj = null; changed = true; }
+      if (await term.isPlainShell(t)) {
+        t.claudeSessionId = null; t.claudeProj = null; changed = true;
+        t.title = baseOf(t.cwd || t.startDir || '') || 'shell'; // claude 退了，标题回落到目录名
+      }
     } catch { /* 查不到前台进程就当没变化 */ }
   }
-  if (changed) refreshSessionOpenState();
+  if (changed) { refreshSessionOpenState(); term.renderTabs(); }
 }
 
 // 开新会话/续会话后，新 jsonl 要几秒才落盘——追加两次延时刷新把它捞进列表
@@ -3899,7 +3953,9 @@ const term = {
     try {
       const r = await window.fanboxPty.cwd(s.id);
       if (r && r.ok && r.cwd && r.cwd !== s.cwd) {
-        s.cwd = r.cwd; s.title = baseOf(r.cwd) || s.title;
+        s.cwd = r.cwd;
+        // ==== 二开: cockpit ==== 挂了 claude 会话的 tab 标题显示会话名（sessTabTitle 维护），不被目录名覆盖
+        if (!s.claudeSessionId) s.title = baseOf(r.cwd) || s.title;
         this.renderTabs(); renderBreadcrumb(); // 面包屑的项目配对色点也跟着换
       }
     } catch { /* 取不到就保持原标题 */ }
