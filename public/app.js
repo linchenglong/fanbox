@@ -3827,6 +3827,9 @@ const term = {
       // agent 常输出按深色终端设计的 256 色/真彩（如淡蓝路径），在浅色皮肤上几乎隐形；
       // 自动把对比度不足的前景色压暗/提亮到 4.5:1（WCAG AA，VS Code 终端同款默认值）
       minimumContrastRatio: 4.5,
+      // ==== 二开: 滚轮一格多滚几行（默认 3 倍≈9 行/格），Alt+滚轮再加速 5 倍翻长输出
+      scrollSensitivity: Number(localStorage.getItem('fb_term_scroll')) || 3,
+      fastScrollSensitivity: 5, // 按住 Alt 滚 = scrollSensitivity × 5
     });
     const fit = FitCtor ? new FitCtor() : null;
     if (fit) xterm.loadAddon(fit);
