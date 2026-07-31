@@ -3510,14 +3510,19 @@ const term = {
     return user ? `"${user}", ${fallback}` : fallback;
   },
   fontSize() { return Math.max(9, Math.min(32, Number(localStorage.getItem('fb_term_fontsize')) || 18)); },
-  setFont(family, size) {
+  // 字重默认 500：低 DPI 屏（DPR=1）上 canvas 灰度抗锯齿偏细发虚，合成加粗半档补回 Warp/iTerm 的原生观感；
+  // PT Mono 这类只有 Regular/Bold 的字体，500 走浏览器合成加粗，实测比 400 饱满、比 700 克制
+  fontWeight() { return localStorage.getItem('fb_term_fontweight') || '500'; },
+  setFont(family, size, weight) {
     if (family !== undefined) localStorage.setItem('fb_term_font', String(family || '').trim());
     if (size !== undefined) localStorage.setItem('fb_term_fontsize', String(size));
-    const fam = this.fontFamily(), fs = this.fontSize();
+    if (weight !== undefined) localStorage.setItem('fb_term_fontweight', String(weight));
+    const fam = this.fontFamily(), fs = this.fontSize(), fw = this.fontWeight();
     this.sessions.forEach((s) => {
       try {
         s.xterm.options.fontFamily = fam;
         s.xterm.options.fontSize = fs;
+        s.xterm.options.fontWeight = fw;
         s._fontSize = fs; // 与 ⌘+/- 缩放基线对齐
       } catch { /* */ }
     });
@@ -3814,7 +3819,7 @@ const term = {
     const FitCtor = window.FitAddon ? (window.FitAddon.FitAddon || window.FitAddon) : null;
     const xterm = new window.Terminal({
       fontFamily: this.fontFamily(),
-      fontSize: this.fontSize(), lineHeight: 1.2, cursorBlink: true, theme: this.theme(), scrollback: 5000,
+      fontSize: this.fontSize(), fontWeight: this.fontWeight(), lineHeight: 1.2, cursorBlink: true, theme: this.theme(), scrollback: 5000,
       allowProposedApi: true, // unicode11 宽度 API 需要
       // claude/codex 等 TUI 会开启鼠标上报，鼠标拖拽被程序吃掉 → 默认无法选中文字。
       // 开这个开关后按住 Option 拖拽即可强制选中复制（iTerm/VS Code 终端同款约定）
