@@ -1435,6 +1435,9 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 /* 终端头：铺满/停靠/收起/文件跟随在驾驶舱里没有意义 */
 #app.cockpit #term-max, #app.cockpit #term-dock, #app.cockpit #term-close, #app.cockpit #file-follow { display: none; }
 
+/* 侧栏文字提亮：条目一律用主文字色（暗皮肤=白），只有未打开的会话保持置灰（规则在下方 sess-closed） */
+.nav-list li { color: var(--text); }
+
 /* 项目行：twirl 控制会话列表开合（比普通目录箭头醒目一号，选择器提级压过 .nav-list li .twirl 的 9px）；右侧＋开新会话 */
 .nav-list li.proj-li .twirl { font-size: 12px; width: 16px; }
 .proj-li .proj-add { flex-shrink: 0; width: 16px; text-align: center; opacity: 0; font-size: 13px; border-radius: 4px; color: var(--text-dim); }
