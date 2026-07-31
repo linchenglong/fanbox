@@ -2841,6 +2841,12 @@ const agentsPop = {
         <input type="text" class="ap-font-family" placeholder="皮肤默认" value="${escapeHtml(localStorage.getItem('fb_term_font') === null ? 'PT Mono' : localStorage.getItem('fb_term_font'))}" spellcheck="false">
         <input type="number" class="ap-font-size" min="9" max="32" step="1" value="${term.fontSize()}"> px
       </div>
+      <div class="ap-row ap-font ap-bg" title="终端垫一张背景图，上面盖半透明黑蒙版——文字看得清，皮肤也在。选图后拖滑杆调蒙版深浅；「清除」回纯色背景">
+        <span class="ap-name">皮肤</span>
+        <button class="ghost-btn ap-bg-pick">${term.bgImage() ? '换图' : '选图'}</button>
+        <input type="range" class="ap-bg-mask" min="0" max="95" step="5" value="${term.bgMask()}" title="蒙版深浅">
+        <button class="ghost-btn ap-bg-clear"${term.bgImage() ? '' : ' disabled'}>清除</button>
+      </div>
       <div class="ap-head ap-sub">Agent 互控</div>
       <div class="ap-row" title="装进 ~/.claude/skills 后，翻箱终端里的 claude 就能指挥兄弟窗口：新开窗口 / 读输出 / 发指令 / 等结果">
         <span class="ap-name">fanbox-agent skill</span>
@@ -2863,6 +2869,20 @@ const agentsPop = {
       const apply = () => { term.setFont(famIn.value, Number(sizeIn.value) || 18); };
       famIn.onchange = apply; sizeIn.onchange = apply;
       [famIn, sizeIn].forEach((el) => { el.addEventListener('keydown', (ev) => { ev.stopPropagation(); if (ev.key === 'Enter') { ev.preventDefault(); apply(); toast('终端字体已更新'); } }); });
+    }
+    // ==== 二开: 终端皮肤垫图（选图 → 即时生效；滑杆调蒙版；清除回纯色）====
+    const bgPick = pop.querySelector('.ap-bg-pick'), bgMask = pop.querySelector('.ap-bg-mask'), bgClear = pop.querySelector('.ap-bg-clear');
+    if (bgPick && bgMask && bgClear) {
+      bgPick.onclick = async () => {
+        if (!window.fanboxUi || !window.fanboxUi.pickImage) { toast('选图需要桌面版（重启 App 后生效）', true); return; }
+        const r = await window.fanboxUi.pickImage().catch(() => null);
+        if (!r || !r.ok) return;
+        term.setBg(r.path, undefined);
+        bgPick.textContent = '换图'; bgClear.disabled = false;
+        toast('终端皮肤已设置，拖滑杆调蒙版深浅');
+      };
+      bgMask.oninput = () => { term.setBg(undefined, Number(bgMask.value)); };
+      bgClear.onclick = () => { term.setBg('', undefined); bgPick.textContent = '选图'; bgClear.disabled = true; toast('已恢复纯色背景'); };
     }
     pop.querySelectorAll('.ap-list .ap-row input').forEach((cb) => {
       cb.onchange = async () => {
@@ -3500,6 +3520,33 @@ const term = {
     },
   },
   theme() { return this.themes[state.theme] || this.themes.terminal; },
+  // ==== 二开: 终端皮肤垫图 —— 一张图 + 半透明黑蒙版，文字清楚、皮肤也在 ====
+  // 图路径存 fb_term_bgimg（本机绝对路径，经 /fs/ 镜像端点出图）；蒙版透明度存 fb_term_bgmask（0-95，%）
+  bgImage() { return (localStorage.getItem('fb_term_bgimg') || '').trim(); },
+  bgMask() { return Math.max(0, Math.min(95, Number(localStorage.getItem('fb_term_bgmask') ?? 60))); },
+  // 有垫图时终端画布走透明背景（图和蒙版由 #xterm-host 的 CSS 承担）
+  effTheme() {
+    const t = this.theme();
+    return this.bgImage() ? { ...t, background: '#00000000' } : t;
+  },
+  applyBg() {
+    const host = $('#xterm-host');
+    const img = this.bgImage();
+    if (img) {
+      const m = (this.bgMask() / 100).toFixed(2);
+      host.style.backgroundImage = `linear-gradient(rgba(0,0,0,${m}), rgba(0,0,0,${m})), url("/fs${encodeURI(img)}")`;
+      host.style.backgroundSize = 'cover';
+      host.style.backgroundPosition = 'center';
+    } else {
+      host.style.backgroundImage = '';
+    }
+    this.retheme(); // 背景透明/还原对所有标签立即生效（内部会清字形图集）
+  },
+  setBg(img, mask) {
+    if (img !== undefined) localStorage.setItem('fb_term_bgimg', String(img || '').trim());
+    if (mask !== undefined) localStorage.setItem('fb_term_bgmask', String(mask));
+    this.applyBg();
+  },
   // ==== 二开: 终端字体可配置（设置面板改，存 localStorage，全 tab 即时生效）====
   // 家族：用户配置打头，皮肤的 --font-term Nerd Font 链殿后——PT Mono 这类没有 powerline 字形的字体不至于满屏 tofu。
   // 从未设置过 → 默认 PT Mono；设置过又清空 → 皮肤默认（null 与空串语义不同）
@@ -3819,7 +3866,8 @@ const term = {
     const FitCtor = window.FitAddon ? (window.FitAddon.FitAddon || window.FitAddon) : null;
     const xterm = new window.Terminal({
       fontFamily: this.fontFamily(),
-      fontSize: this.fontSize(), fontWeight: this.fontWeight(), lineHeight: 1.2, cursorBlink: true, theme: this.theme(), scrollback: 5000,
+      fontSize: this.fontSize(), fontWeight: this.fontWeight(), lineHeight: 1.2, cursorBlink: true, theme: this.effTheme(), scrollback: 5000,
+      allowTransparency: true, // 皮肤垫图：画布透明让 #xterm-host 的背景图透上来（无图时 theme 背景不透明，无损耗）
       allowProposedApi: true, // unicode11 宽度 API 需要
       // claude/codex 等 TUI 会开启鼠标上报，鼠标拖拽被程序吃掉 → 默认无法选中文字。
       // 开这个开关后按住 Option 拖拽即可强制选中复制（iTerm/VS Code 终端同款约定）
@@ -4310,7 +4358,7 @@ const term = {
   },
   // 换主题后 WebGL 图集里缓存的还是旧配色字形，且 CJK 宽字符偶发图集损坏（#37/#45）：清一次图集强制重栅格化。
   // try/catch 兜住 GPU 故障，别让单个 session 的渲染异常连累其它 session 或拖垮渲染进程（#35）。
-  retheme() { const th = this.theme(); this.sessions.forEach((s) => { try { s.xterm.options.theme = th; s.webgl?.clearTextureAtlas?.(); } catch { /* */ } }); },
+  retheme() { const th = this.effTheme(); this.sessions.forEach((s) => { try { s.xterm.options.theme = th; s.webgl?.clearTextureAtlas?.(); } catch { /* */ } }); },
 };
 
 // ---------- Agent 用量面板（侧栏常驻，可开合）----------
@@ -5778,6 +5826,7 @@ window.fbCockpit = (on) => {
   return !!on;
 };
 applyCockpit(cockpitOn()); // 顶层立即生效，早于 init 的异步流程，不闪原版布局
+try { term.applyBg(); } catch { /* 皮肤垫图：启动即恢复（还没开终端也只是给 host 设背景，无副作用） */ }
 
 // Agent 控制接口（/api/agent/*）的渲染侧配合：应 main 之邀开新终端 tab + 给被控 tab 闪 ⚡
 if (window.fanboxAgentCtl) {

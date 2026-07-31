@@ -989,6 +989,16 @@ ipcMain.handle('pty:proc', (e, { id }) => {
   return p ? { ok: true, proc: p.process || '' } : { ok: false };
 });
 
+// ==== 二开: 终端皮肤垫图 —— 系统文件对话框选一张背景图，返回绝对路径 ====
+ipcMain.handle('ui:pick-image', async () => {
+  const r = await dialog.showOpenDialog(win && !win.isDestroyed() ? win : undefined, {
+    title: '选择终端背景图',
+    properties: ['openFile'],
+    filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'avif', 'heic'] }],
+  });
+  return r.canceled || !r.filePaths.length ? { ok: false } : { ok: true, path: r.filePaths[0] };
+});
+
 // ---------- 微信 ClawBot：不经 openclaw，直连腾讯 iLink 协议 + 本机 claude/codex 无头实例 ----------
 // 编排见 electron/wechat/bridge.js（iLink 客户端 ilink.js + 本机 CLI 驱动 driver.js）。
 // 参考的开源项目与署名见 docs/08-微信ClawBot-参考与署名.md。

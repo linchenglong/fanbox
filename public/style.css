@@ -1437,6 +1437,9 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 
 /* 侧栏文字提亮：条目一律用主文字色（暗皮肤=白），只有未打开的会话保持置灰（规则在下方 sess-closed） */
 .nav-list li { color: var(--text); }
+/* 区块标题/副标题/空态提示/皮肤标签/电源开关/页脚——全部同步提亮 */
+#sidebar .nav-title, #sidebar .nav-empty, .brand-sub, .brand-ver,
+.theme-switch-label, .pw-label, .sidebar-foot, .sess-more { color: var(--text); }
 
 /* 项目行：twirl 控制会话列表开合（比普通目录箭头醒目一号，选择器提级压过 .nav-list li .twirl 的 9px）；右侧＋开新会话 */
 .nav-list li.proj-li .twirl { font-size: 12px; width: 16px; }
@@ -1471,3 +1474,7 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .agents-pop .ap-font .ap-font-family { flex: 1; min-width: 0; }
 .agents-pop .ap-font .ap-font-size { width: 52px; }
 .agents-pop .ap-font input:focus { outline: none; border-color: var(--accent); }
+/* 设置面板 · 终端皮肤垫图行 */
+.agents-pop .ap-bg .ap-bg-mask { flex: 1; min-width: 0; padding: 0; accent-color: var(--accent); border: none; background: transparent; }
+.agents-pop .ap-bg .ghost-btn { font-size: 12px; padding: 3px 9px; }
+.agents-pop .ap-bg .ghost-btn:disabled { opacity: 0.4; cursor: default; }
