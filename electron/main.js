@@ -590,6 +590,12 @@ ipcMain.handle('pty:spawn', (e, { id, cwd, cols, rows, theme }) => {
     // 终端里的 agent 天生知道自己是几号窗口、控制接口在哪、门票是啥——skill 零配置（见 docs/12）
     FANBOX_TERM_ID: id, FANBOX_CTL: `http://127.0.0.1:${PORT}/api/agent`, FANBOX_CTL_TOKEN: AGENT_TOKEN,
   };
+  // ==== 二开: 清掉 Claude Code 的污染环境变量 ====
+  // FanBox 若本身跑在某个 claude 会话里（如 Agent 驱动开发），process.env 会带 CLAUDECODE/CLAUDE_CODE_SESSION_ID
+  // 等。终端 PTY 继承下去后，里面启动的 claude 会以为自己是父会话的子 agent，不往自己 session 的 jsonl
+  // 写任何对话（只写 mode/permission-mode 元信息）→ 对话内容丢失、claudex -r <id> 找不到会话。
+  // 证据见 warp自定义/CLAUDE.md「☠️ 启动 GUI 必须清环境变量」节。清掉后终端里的 claude 是独立进程，正常落盘。
+  for (const k of ['CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH']) delete env[k];
   if (!/UTF-8/i.test(env.LC_ALL || env.LC_CTYPE || env.LANG || '')) env.LANG = 'zh_CN.UTF-8';
   let p;
   try {
