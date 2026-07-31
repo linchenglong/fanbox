@@ -2058,13 +2058,15 @@ function sessionOpenIds() {
   return ids;
 }
 
-// 只翻新 open/closed 高亮，不重建 DOM（renderTabs 每次都路过这里，必须廉价）
+// 只翻新 open/closed 高亮，不重建 DOM（renderTabs 每次都路过这里，必须廉价）。
+// 打开 = 服务端进程探活（覆盖 iTerm/Warp/系统终端）∪ FanBox 自己的活 tab（新开瞬间注册表还没落盘，先亮起来）
 function refreshSessionOpenState() {
-  const open = sessionOpenIds();
+  const fbOpen = sessionOpenIds();
   document.querySelectorAll('#agent-projects-list .sess-li').forEach((li) => {
-    const on = open.has(li.dataset.sid);
+    const on = li.dataset.open === '1' || fbOpen.has(li.dataset.sid);
     li.classList.toggle('sess-open', on);
     li.classList.toggle('sess-closed', !on);
+    li.querySelector('.sess-dot').classList.toggle('st-off', !on); // 闭合会话：中性灰点，无状态
   });
 }
 
@@ -2158,14 +2160,16 @@ function sessLi(pj, s) {
   const li = document.createElement('li');
   li.className = 'sess-li sess-closed';
   li.dataset.sid = s.id;
-  const stInfo = SESS_STATUS[s.status] || SESS_STATUS.done;
+  li.dataset.open = s.open ? '1' : '0';
+  // 状态只属于打开着的会话；闭合会话就是一枚中性灰点
+  const stInfo = s.open && SESS_STATUS[s.status] ? SESS_STATUS[s.status] : null;
   const dot = document.createElement('span');
-  dot.className = 'sess-dot ' + stInfo.cls;
-  dot.title = stInfo.label;
+  dot.className = 'sess-dot' + (stInfo ? ' ' + stInfo.cls : ' st-off');
+  dot.title = stInfo ? stInfo.label : '未打开';
   const label = document.createElement('span');
   label.className = 'label';
   label.textContent = s.name || s.title || '（无标题会话）';
-  li.title = `${stInfo.label} · ${s.title || '（无标题会话）'}\n${fmtTime(s.lastT)}${s.userMsgs ? ` · ${s.userMsgs} 条消息` : ''}\n单击：打开 / 切换到这个会话`;
+  li.title = `${stInfo ? stInfo.label + ' · ' : ''}${s.title || '（无标题会话）'}\n${fmtTime(s.lastT)}${s.userMsgs ? ` · ${s.userMsgs} 条消息` : ''}\n单击：打开 / 切换到这个会话`;
   const edit = document.createElement('span');
   edit.className = 'sess-edit';
   edit.textContent = '✎';
@@ -2832,6 +2836,11 @@ const agentsPop = {
         <input type="checkbox" ${(() => { try { return localStorage.getItem('fanbox.noWebgl') === '1' ? '' : 'checked'; } catch { return 'checked'; } })()}>
         <span class="ap-name">WebGL 加速渲染</span>
       </label>
+      <div class="ap-row ap-font" title="字体名要和「字体册」里显示的一致（如 PT Mono / JetBrainsMono Nerd Font）；留空回到皮肤默认。改完立即对所有终端标签生效">
+        <span class="ap-name">字体</span>
+        <input type="text" class="ap-font-family" placeholder="皮肤默认" value="${escapeHtml(localStorage.getItem('fb_term_font') === null ? 'PT Mono' : localStorage.getItem('fb_term_font'))}" spellcheck="false">
+        <input type="number" class="ap-font-size" min="9" max="32" step="1" value="${term.fontSize()}"> px
+      </div>
       <div class="ap-head ap-sub">Agent 互控</div>
       <div class="ap-row" title="装进 ~/.claude/skills 后，翻箱终端里的 claude 就能指挥兄弟窗口：新开窗口 / 读输出 / 发指令 / 等结果">
         <span class="ap-name">fanbox-agent skill</span>
@@ -2848,6 +2857,13 @@ const agentsPop = {
     this.markSkill(pop);
     const wgCb = pop.querySelector('[data-webgl] input');
     if (wgCb) wgCb.onchange = () => { term.setWebgl(wgCb.checked); toast(wgCb.checked ? 'WebGL 渲染已开启' : '已切换兼容渲染（修中文乱码）'); };
+    // ==== 二开: 终端字体（改完即生效；输入框内敲键不触发面板外的全局快捷键）====
+    const famIn = pop.querySelector('.ap-font-family'), sizeIn = pop.querySelector('.ap-font-size');
+    if (famIn && sizeIn) {
+      const apply = () => { term.setFont(famIn.value, Number(sizeIn.value) || 18); };
+      famIn.onchange = apply; sizeIn.onchange = apply;
+      [famIn, sizeIn].forEach((el) => { el.addEventListener('keydown', (ev) => { ev.stopPropagation(); if (ev.key === 'Enter') { ev.preventDefault(); apply(); toast('终端字体已更新'); } }); });
+    }
     pop.querySelectorAll('.ap-list .ap-row input').forEach((cb) => {
       cb.onchange = async () => {
         const ids = [...pop.querySelectorAll('.ap-list .ap-row input:checked')].map((x) => x.closest('.ap-row').dataset.id);
@@ -3484,6 +3500,33 @@ const term = {
     },
   },
   theme() { return this.themes[state.theme] || this.themes.terminal; },
+  // ==== 二开: 终端字体可配置（设置面板改，存 localStorage，全 tab 即时生效）====
+  // 家族：用户配置打头，皮肤的 --font-term Nerd Font 链殿后——PT Mono 这类没有 powerline 字形的字体不至于满屏 tofu。
+  // 从未设置过 → 默认 PT Mono；设置过又清空 → 皮肤默认（null 与空串语义不同）
+  fontFamily() {
+    const fallback = getComputedStyle(document.documentElement).getPropertyValue('--font-term').trim() || 'monospace';
+    const saved = localStorage.getItem('fb_term_font');
+    const user = (saved === null ? 'PT Mono' : saved).trim();
+    return user ? `"${user}", ${fallback}` : fallback;
+  },
+  fontSize() { return Math.max(9, Math.min(32, Number(localStorage.getItem('fb_term_fontsize')) || 18)); },
+  setFont(family, size) {
+    if (family !== undefined) localStorage.setItem('fb_term_font', String(family || '').trim());
+    if (size !== undefined) localStorage.setItem('fb_term_fontsize', String(size));
+    const fam = this.fontFamily(), fs = this.fontSize();
+    this.sessions.forEach((s) => {
+      try {
+        s.xterm.options.fontFamily = fam;
+        s.xterm.options.fontSize = fs;
+        s._fontSize = fs; // 与 ⌘+/- 缩放基线对齐
+      } catch { /* */ }
+    });
+    // 字体度量变了：全部重排 + 清字形图集（图集跨标签共享，见 adjustFont 的教训）
+    requestAnimationFrame(() => {
+      this.sessions.forEach((s) => { try { s.fit && s.fit.fit(); } catch { /* */ } });
+      this.sessions.forEach((s) => { try { s.webgl?.clearTextureAtlas?.(); } catch { /* */ } });
+    });
+  },
   toggle() {
     if (!this.available()) { if (state.cwd) openWith(state.cwd, 'terminal'); return; } // 浏览器降级到系统终端
     const hidden = $('#terminal-panel').classList.contains('hidden');
@@ -3770,8 +3813,8 @@ const term = {
     host.classList.add('show'); // 先可见再 open/fit：display:none 下 fit 量不出尺寸，PTY 会以 80 列出生
     const FitCtor = window.FitAddon ? (window.FitAddon.FitAddon || window.FitAddon) : null;
     const xterm = new window.Terminal({
-      fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-term').trim() || 'monospace',
-      fontSize: 13, lineHeight: 1.2, cursorBlink: true, theme: this.theme(), scrollback: 5000,
+      fontFamily: this.fontFamily(),
+      fontSize: this.fontSize(), lineHeight: 1.2, cursorBlink: true, theme: this.theme(), scrollback: 5000,
       allowProposedApi: true, // unicode11 宽度 API 需要
       // claude/codex 等 TUI 会开启鼠标上报，鼠标拖拽被程序吃掉 → 默认无法选中文字。
       // 开这个开关后按住 Option 拖拽即可强制选中复制（iTerm/VS Code 终端同款约定）
@@ -4117,11 +4160,11 @@ const term = {
       } catch { /* 单个会话失败不拦其他 */ }
     });
   },
-  // 字体缩放：⌘+/⌘- 调整字号，⌘0 重置为默认 13px
+  // 字体缩放：⌘+/⌘- 调整字号，⌘0 重置为设置面板配置的基准字号
   adjustFont(sess, delta) {
-    if (!sess._fontSize) sess._fontSize = 13;
-    if (delta === 0) sess._fontSize = 13;
-    else sess._fontSize = Math.max(10, Math.min(24, sess._fontSize + delta));
+    if (!sess._fontSize) sess._fontSize = this.fontSize();
+    if (delta === 0) sess._fontSize = this.fontSize();
+    else sess._fontSize = Math.max(10, Math.min(32, sess._fontSize + delta));
     const xterm = sess.xterm;
     // xterm 没有直接改 fontSize 的 API，通过 options 更新
     xterm.options.fontSize = sess._fontSize;
