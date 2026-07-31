@@ -1121,6 +1121,11 @@ kbd {
 .term-tab .tab-dot.busy { background: var(--green, #3fb950); animation: tabpulse 1.1s ease-in-out infinite; }
 .term-tab .tab-dot.idle { background: var(--text-dim); opacity: 0.5; }
 .term-tab .tab-dot.dead { background: var(--accent); }
+/* ==== 二开: cockpit ==== 挂 claude 会话的 tab：圆点与侧栏 session 列表同款四态色 */
+.term-tab .tab-dot.st-running { background: #4c8dff; animation: tabpulse 1.1s ease-in-out infinite; }
+.term-tab .tab-dot.st-waiting { background: #ff9f43; }
+.term-tab .tab-dot.st-background { background: #a78bfa; }
+.term-tab .tab-dot.st-done { background: var(--green, #3fb950); opacity: 0.85; }
 .term-tab.unread:not(.active) { color: var(--text); }
 .term-tab.unread:not(.active) .tab-dot.idle { background: var(--accent); opacity: 1; }
 @keyframes tabpulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }

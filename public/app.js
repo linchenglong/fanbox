@@ -2106,6 +2106,7 @@ async function loadAgentProjects() {
   if (sig !== loadAgentProjects._sig) {
     loadAgentProjects._sig = sig;
     renderSessionNav();
+    term.renderTabs(); // tab 圆点的四态色与侧栏同源，状态变了一起重画
   }
   refreshSessionOpenState();
 }
@@ -4046,10 +4047,11 @@ const term = {
         return false;
       }
       // ==== 二开: ⌘+Enter / Shift+Enter 换行（claude TUI 默认 Enter 是提交）====
-      // 发送 ESC+CR（=Option+Enter 在 iTerm/VS Code 里的等价序列），claude 收到后换行不提交
+      // 发送 ESC+CR（=Option+Enter 在 iTerm/VS Code 里的等价序列），claude 收到后换行不提交。
+      // 只在 keydown 发送——handler 对同一次按键会收到 keydown/keyup 两个事件，不过滤会换两行
       if ((e.metaKey || e.shiftKey) && (e.key === 'Enter' || e.key === 'Return')) {
         e.preventDefault();
-        term.input(sess.id, '\x1b\r');
+        if (e.type === 'keydown') term.input(sess.id, '\x1b\r');
         return false;
       }
       if (cmd && (e.key === '=' || e.key === '+' || e.key === '0')) {
@@ -4450,10 +4452,17 @@ const term = {
     bar.innerHTML = '';
     this.sessions.forEach((s) => {
       const t = document.createElement('div');
-      const dotState = s.dead ? 'dead' : (s.status === 'busy' ? 'busy' : 'idle');
+      // ==== 二开: cockpit ==== 挂了 claude 会话的 tab，圆点用侧栏同款四态色（数据同源 sessUI）；
+      // 普通 shell tab 保持上游的 busy/idle/dead 三态
+      let dotState = s.dead ? 'dead' : (s.status === 'busy' ? 'busy' : 'idle');
+      let dotTitle = s.dead ? '进程已退出' : (s.status === 'busy' ? 'agent 运行中' : '空闲');
+      if (!s.dead && s.claudeSessionId && typeof sessUI !== 'undefined') {
+        const info = sessUI.projects.flatMap((p) => p.sessions).find((x) => x.id === s.claudeSessionId);
+        const st = info && SESS_STATUS[info.status];
+        if (st) { dotState = st.cls; dotTitle = st.label; }
+      }
       const followed = follow.on && follow.sid === s.id; // 文件跟随正盯着这个 tab
       t.className = 'term-tab' + (s.id === this.active ? ' active' : '') + (s.unread ? ' unread' : '') + (followed ? ' following' : '');
-      const dotTitle = s.dead ? '进程已退出' : (s.status === 'busy' ? 'agent 运行中' : '空闲');
       // 终端图标按项目路径染色：同项目同色，和面包屑的配对色点呼应
       const hue = this.hueOf(s.cwd || s.startDir);
       t.title = followed ? '文件跟随正盯着这个终端 · 双击跳到它所在目录' : '双击：文件区跳到该终端所在目录';
