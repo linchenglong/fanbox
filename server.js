@@ -747,6 +747,37 @@ async function parseClaudeSession(fp, st) {
   return sess;
 }
 
+// ==== 二开: cockpit —— 「被打开的会话」探活 ====
+// 数据源：~/.claude/sessions/<PID>.json 注册表（每个交互式 claude 进程自己写，含当前 sessionId），
+// 再用一次 ps 批量核对 pid 是否还活着——死进程留下的 stale 注册表不算数。
+// 这天然覆盖所有宿主：FanBox 内嵌终端、iTerm、Warp、系统终端里跑的 claude 全都有注册表。
+const CLAUDE_SESS_REG = path.join(HOME, '.claude', 'sessions');
+let liveSessCache = { at: 0, ids: new Set() };
+async function liveClaudeSessionIds() {
+  if (Date.now() - liveSessCache.at < 5000) return liveSessCache.ids; // 5s 缓存：侧栏轮询不至于每次都 ps
+  const entries = [];
+  try {
+    for (const n of await fsp.readdir(CLAUDE_SESS_REG)) {
+      if (!n.endsWith('.json')) continue;
+      try {
+        const j = JSON.parse(await fsp.readFile(path.join(CLAUDE_SESS_REG, n), 'utf8'));
+        if (j && j.pid && j.sessionId) entries.push({ pid: Number(j.pid), sid: String(j.sessionId) });
+      } catch { /* 单个坏文件不拦 */ }
+    }
+  } catch { /* 目录不存在 = 没有活会话 */ }
+  const ids = new Set();
+  if (entries.length) {
+    const alive = await new Promise((resolve) => {
+      execFile('ps', ['-p', entries.map((e) => e.pid).join(','), '-o', 'pid='], { timeout: 3000 }, (err, out) => {
+        resolve(new Set(String(out || '').split('\n').map((s) => Number(s.trim())).filter(Boolean)));
+      });
+    });
+    for (const e of entries) if (alive.has(e.pid)) ids.add(e.sid);
+  }
+  liveSessCache = { at: Date.now(), ids };
+  return ids;
+}
+
 // ==== 二开: cockpit —— 四态判定（纯函数，不改缓存）====
 // running    进行中：最后一轮是工具调用/工具结果，且 jsonl 在活跃窗口内仍有写入（防被中断的僵尸蓝点）
 // waiting    等待确认：最后一轮停在 AskUserQuestion（其后无任何回答/新对话）
@@ -1993,7 +2024,7 @@ const SESS_RESUME_DEFAULT = 'claudex -r {id}';
 const SESS_NEW_DEFAULT = 'claudex';
 
 async function agentSessions() {
-  const [projData, cfg] = await Promise.all([agentProjects(), readConfig()]);
+  const [projData, cfg, liveIds] = await Promise.all([agentProjects(), readConfig(), liveClaudeSessionIds()]);
   const names = cfg.sessionNames || {};
   const activeWindowMs = Number(cfg.sessionActiveWindowMs) || 60000;
   const now = Date.now();
@@ -2013,7 +2044,9 @@ async function agentSessions() {
         const s = await parseClaudeSession(f.fp, f.st);
         // 空会话（无人打过字、也没标题）多半是探测/崩溃残留，列出来只添乱
         if (!s.title && !s.userMsgs) continue;
-        sessions.push({ id: s.id, title: s.title, name: names[s.id] || '', lastT: s.lastT, userMsgs: s.userMsgs, status: decideSessionStatus(s, activeWindowMs, now) });
+        // 状态只属于「被某个软件打开着」的会话（注册表 + 进程探活）；闭合会话无状态
+        const open = liveIds.has(s.id);
+        sessions.push({ id: s.id, title: s.title, name: names[s.id] || '', lastT: s.lastT, userMsgs: s.userMsgs, open, status: open ? decideSessionStatus(s, activeWindowMs, now) : null });
       } catch { /* 单文件解析失败不拖累整个项目 */ }
     }
     if (!sessions.length) return;
