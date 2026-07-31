@@ -2040,33 +2040,215 @@ function agoShort(ms) {
   if (m < 1440) return Math.round(m / 60) + ' 时';
   return Math.round(m / 1440) + ' 天';
 }
+// ==== 二开: cockpit —— Agent 项目 → Claude session 列表 ====
+// 侧栏不再展示项目子文件夹，改为展示每个项目的 Claude 会话（按最后活跃降序）。
+// 点击 session：已开 tab → 切过去；没开 → 在项目目录新开 tab 自动续上（命令模板存 config.json）。
+const sessUI = {
+  resumeCmd: 'claudex -r {id}',
+  newCmd: 'claudex',
+  projects: [],
+  showAll: new Set(),    // 点过「还有 N 个」的项目
+  collapsed: new Set(),  // 收起了整个会话列表的项目
+  MAX: 5,                // 默认最多露出的 session 数
+};
+
+function sessionOpenIds() {
+  const ids = new Set();
+  term.sessions.forEach((s) => { if (!s.dead && s.claudeSessionId) ids.add(s.claudeSessionId); });
+  return ids;
+}
+
+// 只翻新 open/closed 高亮，不重建 DOM（renderTabs 每次都路过这里，必须廉价）
+function refreshSessionOpenState() {
+  const open = sessionOpenIds();
+  document.querySelectorAll('#agent-projects-list .sess-li').forEach((li) => {
+    const on = open.has(li.dataset.sid);
+    li.classList.toggle('sess-open', on);
+    li.classList.toggle('sess-closed', !on);
+  });
+}
+
 async function loadAgentProjects() {
   let data;
-  try { data = await api('/api/agent-projects'); } catch { return; }
-  const list = (data.projects || []).slice(0, 8);
-  // 数据没变就不动 DOM，免得定时刷新把用户展开的子树抹掉
-  const sig = JSON.stringify(list);
-  if (sig === loadAgentProjects._sig) return;
-  loadAgentProjects._sig = sig;
+  try { data = await api('/api/agent-sessions'); } catch { return; }
+  if (!data.ok) return;
+  sessUI.resumeCmd = data.resumeCmd || sessUI.resumeCmd;
+  sessUI.newCmd = data.newCmd || sessUI.newCmd;
+  sessUI.projects = data.projects || [];
+  adoptLiveSessions();
+  checkSessionTabsAlive(); // 异步不 await：结果出来自己补高亮
+  // 数据没变就不动 DOM，免得定时刷新抹掉用户的展开状态
+  const sig = JSON.stringify(sessUI.projects);
+  if (sig !== loadAgentProjects._sig) {
+    loadAgentProjects._sig = sig;
+    renderSessionNav();
+  }
+  refreshSessionOpenState();
+}
+
+function renderSessionNav() {
   const ul = $('#agent-projects-list');
   ul.innerHTML = '';
-  if (!list.length) { ul.innerHTML = '<div class="nav-empty">用 Claude Code / Codex 跑过的项目会出现在这里</div>'; return; }
-  list.forEach((pj) => {
-    const li = navDirLi(pj.name, pj.path);
-    li.querySelector('.label').title = `${pj.path}\n${pj.agents.join(' + ')} · ${agoShort(pj.lastActive)}前活跃`;
+  if (!sessUI.projects.length) { ul.innerHTML = '<div class="nav-empty">用 Claude Code 跑过的项目会出现在这里</div>'; return; }
+  sessUI.projects.forEach((pj) => {
+    const li = document.createElement('li');
+    li.className = 'proj-li';
+    li.dataset.path = pj.path;
+    const collapsed = sessUI.collapsed.has(pj.path);
+    const twirl = document.createElement('span');
+    twirl.className = 'twirl';
+    twirl.textContent = collapsed ? '▸' : '▾';
+    twirl.title = collapsed ? '展开会话列表' : '收起会话列表';
+    twirl.onclick = (ev) => {
+      ev.stopPropagation();
+      if (collapsed) sessUI.collapsed.delete(pj.path); else sessUI.collapsed.add(pj.path);
+      renderSessionNav();
+      refreshSessionOpenState();
+    };
+    const ico = document.createElement('span');
+    ico.className = 'ico';
+    ico.innerHTML = svgWrap(SVG.folder, 'currentColor', 16, true);
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = pj.name;
+    label.title = `${pj.path}\n${agoShort(pj.lastActive)}前活跃 · 单击把「＋ 终端」的落点切到这里`;
     const when = document.createElement('span');
     when.className = 'when';
-    pj.agents.forEach((a) => {
-      const dot = document.createElement('i');
-      dot.className = 'agent-dot ' + a;
-      dot.title = a;
-      when.appendChild(dot);
-    });
     when.append(agoShort(pj.lastActive));
-    li.appendChild(when);
+    li.append(twirl, ico, label, when);
+    li.onclick = () => navigate(pj.path); // 选中项目：⌘K / ＋ 终端 都落在这个目录
+    makeDraggablePath(li, pj.path);
     ul.appendChild(li);
+    if (collapsed) return;
+    const sub = document.createElement('ul');
+    sub.className = 'nav-list nav-sub sess-list';
+    const showAll = sessUI.showAll.has(pj.path);
+    (showAll ? pj.sessions : pj.sessions.slice(0, sessUI.MAX)).forEach((s) => sub.appendChild(sessLi(pj, s)));
+    if (pj.sessions.length > sessUI.MAX) {
+      const more = document.createElement('li');
+      more.className = 'sess-more';
+      more.textContent = showAll ? '收起' : `还有 ${pj.sessions.length - sessUI.MAX} 个…`;
+      more.onclick = () => {
+        if (showAll) sessUI.showAll.delete(pj.path); else sessUI.showAll.add(pj.path);
+        renderSessionNav();
+        refreshSessionOpenState();
+      };
+      sub.appendChild(more);
+    }
+    const add = document.createElement('li');
+    add.className = 'sess-new';
+    add.innerHTML = '<span class="sess-plus">＋</span> 新会话';
+    add.title = `在 ${pj.name} 开一个全新的 Claude 会话`;
+    add.onclick = () => launchNewSession(pj.path);
+    sub.appendChild(add);
+    ul.appendChild(sub);
   });
   renderRootsActive(); // 重渲后补一次高亮，让「当前所在的 agent 项目」保持选中态
+}
+
+function sessLi(pj, s) {
+  const li = document.createElement('li');
+  li.className = 'sess-li sess-closed';
+  li.dataset.sid = s.id;
+  const dot = document.createElement('span');
+  dot.className = 'sess-dot';
+  const label = document.createElement('span');
+  label.className = 'label';
+  label.textContent = s.name || s.title || '（无标题会话）';
+  li.title = `${s.title || '（无标题会话）'}\n${fmtTime(s.lastT)}${s.userMsgs ? ` · ${s.userMsgs} 条消息` : ''}\n单击：打开 / 切换到这个会话`;
+  const edit = document.createElement('span');
+  edit.className = 'sess-edit';
+  edit.textContent = '✎';
+  edit.title = '重命名';
+  edit.onclick = (ev) => { ev.stopPropagation(); renameSession(pj, s); };
+  li.append(dot, label, edit);
+  li.onclick = () => openSession(pj.path, s.id);
+  return li;
+}
+
+// 点击 session：已有活 tab → 切换；否则在项目目录开 tab、自动跑续接命令。
+// 不真的敲 `cd`——pty spawn 时 cwd 就是项目目录，效果等价且不脏 shell 历史。
+async function openSession(projPath, sessId) {
+  if (!term.available()) { toast('内嵌终端不可用（网页版）——请用桌面 App 打开会话', true); return; }
+  const live = term.sessions.find((s) => !s.dead && s.claudeSessionId === sessId);
+  if (live) {
+    if ($('#terminal-panel').classList.contains('hidden')) term.open();
+    term.activate(live.id);
+    live.xterm.focus();
+    return;
+  }
+  const sess = await term.openInDir(projPath);
+  if (!sess || sess.dead) return;
+  sess.claudeSessionId = sessId;
+  sess.claudeProj = projPath;
+  sess.sessSpawnT = Date.now();
+  term.input(sess.id, sessUI.resumeCmd.replace('{id}', sessId) + '\r');
+  sess.xterm.focus();
+  refreshSessionOpenState();
+  scheduleSessRefresh();
+}
+
+async function launchNewSession(projPath) {
+  if (!term.available()) { toast('内嵌终端不可用（网页版）——请用桌面 App 开新会话', true); return; }
+  const sess = await term.openInDir(projPath);
+  if (!sess || sess.dead) return;
+  sess.claudeSessionId = null; // 等新 session 的 jsonl 出现后由 adoptLiveSessions 认领
+  sess.claudeProj = projPath;
+  sess.sessSpawnT = Date.now();
+  term.input(sess.id, sessUI.newCmd + '\r');
+  sess.xterm.focus();
+  scheduleSessRefresh();
+}
+
+async function renameSession(pj, s) {
+  const name = await inputDialog('重命名会话', s.name || s.title || '', '取个好认的名字（留空恢复默认标题）');
+  if (name === null) return;
+  const r = await apiPost('/api/session-name', { id: s.id, name });
+  if (!r.ok) { toast(r.error || '改名失败', true); return; }
+  // 弹窗期间列表可能已被定时刷新换成新数组——按 id 找「现在」的对象改，别改闭包里的孤儿
+  const cur = sessUI.projects.flatMap((p) => p.sessions).find((x) => x.id === s.id);
+  if (cur) cur.name = name;
+  loadAgentProjects._sig = null; // 数据变了，强制重渲
+  renderSessionNav();
+  refreshSessionOpenState();
+}
+
+// resume 在部分版本会把续写落到「新 session id」的 jsonl（fork）；「＋ 新会话」的 tab 一开始也没有 id。
+// 认领规则：这个 tab 启动之后仍在更新、且没被其它 tab 认领的最新 session。
+// 有旧标签时还要求旧 id 已断更（lastT 停在 tab 启动附近）——正常续写同一个 id 时绝不换标签。
+function adoptLiveSessions() {
+  const byProj = new Map(sessUI.projects.map((p) => [p.path, p.sessions]));
+  const claimed = sessionOpenIds();
+  term.sessions.forEach((t) => {
+    if (t.dead || !t.claudeProj) return;
+    const list = byProj.get(t.claudeProj);
+    if (!list) return;
+    const cur = t.claudeSessionId ? list.find((x) => x.id === t.claudeSessionId) : null;
+    const cand = list.find((x) => x.id !== t.claudeSessionId && !claimed.has(x.id) && x.lastT > (t.sessSpawnT || 0));
+    if (!cand) return;
+    if (!cur || (cand.lastT > cur.lastT && cur.lastT < (t.sessSpawnT || 0) + 15000)) {
+      t.claudeSessionId = cand.id;
+      claimed.add(cand.id);
+    }
+  });
+}
+
+// claude 退出回到裸 shell → 摘标签，session 变灰。刚开的 tab 给 15s 宽限（claudex 可能还没起来）
+async function checkSessionTabsAlive() {
+  let changed = false;
+  for (const t of term.sessions) {
+    if (t.dead || (!t.claudeSessionId && !t.claudeProj)) continue;
+    if (Date.now() - (t.sessSpawnT || 0) < 15000) continue;
+    try {
+      if (await term.isPlainShell(t)) { t.claudeSessionId = null; t.claudeProj = null; changed = true; }
+    } catch { /* 查不到前台进程就当没变化 */ }
+  }
+  if (changed) refreshSessionOpenState();
+}
+
+// 开新会话/续会话后，新 jsonl 要几秒才落盘——追加两次延时刷新把它捞进列表
+function scheduleSessRefresh() {
+  [5000, 20000].forEach((ms) => setTimeout(() => loadAgentProjects(), ms));
 }
 
 // ---------- 最近修改 ----------
@@ -4056,6 +4238,8 @@ const term = {
       t.ondblclick = (e) => { if (e.target.classList.contains('tab-x')) return; this.locateCwd(); };
       bar.appendChild(t);
     });
+    // ==== 二开: cockpit ==== tab 的开/关/换目录都路过这里，顺手翻新侧栏 session 高亮
+    try { refreshSessionOpenState(); } catch { /* init 早期侧栏还没渲染 */ }
   },
   // 换主题后 WebGL 图集里缓存的还是旧配色字形，且 CJK 宽字符偶发图集损坏（#37/#45）：清一次图集强制重栅格化。
   // try/catch 兜住 GPU 故障，别让单个 session 的渲染异常连累其它 session 或拖垮渲染进程（#35）。
@@ -5449,13 +5633,15 @@ async function init() {
   cronPanel.syncBadge();
   loadAgentProjects();
   setInterval(loadAgentProjects, 120000); // agent 项目入口保持新鲜（服务端有 60s 缓存，开销很小）
+  setInterval(checkSessionTabsAlive, 20000); // ==== 二开: cockpit ==== claude 退出 → session 及时变灰（每 tab 一次 pty:proc IPC，很轻）
   // 回到上次浏览的目录（目录已不存在则退回主目录）
   const lastDir = localStorage.getItem('fb_last_cwd');
   await navigate(lastDir || state.home, false);
   if (!state.cwd) await navigate(state.home, false);
   // 恢复上次终端开合与标签布局（几个标签、各在哪个目录、谁在前台；进程不复活）。
   // 首次安装没有任何记录 → 默认打开：侧栏 + 文件区 + 终端的三栏就是 FanBox 的本来形态
-  if (term.available() && localStorage.getItem('fb_term_open') !== '0') {
+  // ==== 二开: cockpit ==== 驾驶舱模式下终端是主体，无视 fb_term_open=0 也要打开
+  if (term.available() && (cockpitOn() || localStorage.getItem('fb_term_open') !== '0')) {
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem('fb_term_tabs') || 'null'); } catch { /* */ }
     if (saved && Array.isArray(saved.tabs) && saved.tabs.length) await term.restore(saved);
@@ -5506,6 +5692,23 @@ function bindUpdateNotice() {
 // 终端渲染器诊断开关：fbWebgl(false) 关 WebGL 用 DOM renderer 排查 CJK 残影，fbWebgl(true) 恢复。
 // 与设置面板「WebGL 加速渲染」同一逻辑，对所有已开标签立即生效
 window.fbWebgl = (on) => { term.setWebgl(!!on); console.log('[fanbox] WebGL ' + (on ? '已开启' : '已关闭（DOM renderer 兼容渲染）') + '，已对所有终端标签生效'); return !!on; };
+
+// ==== 二开: cockpit —— 驾驶舱布局开关（默认开）====
+// 左侧栏 + 右侧全宽终端，文件区/预览隐藏不删（代码照常运行，只是 display:none）。
+// 控制台 fbCockpit(false) 随时切回原版三栏排查问题。
+function cockpitOn() { return localStorage.getItem('fb_cockpit') !== '0'; }
+function applyCockpit(on) {
+  document.getElementById('app').classList.toggle('cockpit', on);
+  if (on && term.available() && $('#terminal-panel').classList.contains('hidden') && term.sessions.length) term.open();
+  try { term.fitActive(); } catch { /* 终端还没起来 */ }
+}
+window.fbCockpit = (on) => {
+  localStorage.setItem('fb_cockpit', on ? '1' : '0');
+  applyCockpit(!!on);
+  console.log('[fanbox] 驾驶舱布局' + (on ? '已开启' : '已关闭（恢复原版三栏）'));
+  return !!on;
+};
+applyCockpit(cockpitOn()); // 顶层立即生效，早于 init 的异步流程，不闪原版布局
 
 // Agent 控制接口（/api/agent/*）的渲染侧配合：应 main 之邀开新终端 tab + 给被控 tab 闪 ⚡
 if (window.fanboxAgentCtl) {

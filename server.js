@@ -1940,6 +1940,47 @@ async function agentProjects(force = false) {
   return data;
 }
 
+// ==== 二开: cockpit —— 项目 → Claude session 列表（侧栏驾驶舱数据源）====
+// 复用 agentProjects() 的项目发现 + parseClaudeSession 的单文件解析（带 size/mtime 缓存），
+// 只聚合 Claude 的会话（codex/kimi/opencode 不进侧栏）。自定义名与命令模板存 config.json。
+const SESS_RESUME_DEFAULT = 'claudex -r {id}';
+const SESS_NEW_DEFAULT = 'claudex';
+
+async function agentSessions() {
+  const [projData, cfg] = await Promise.all([agentProjects(), readConfig()]);
+  const names = cfg.sessionNames || {};
+  const projects = [];
+  await Promise.all((projData.projects || []).map(async (pj) => {
+    const dir = path.join(CLAUDE_PROJ, mungeClaudeDir(pj.path));
+    let entries;
+    try { entries = await fsp.readdir(dir); } catch { return; } // 纯 codex 项目没有 claude 目录，不进侧栏
+    const files = [];
+    await Promise.all(entries.filter((n) => n.endsWith('.jsonl')).map(async (n) => {
+      try { const fp = path.join(dir, n); files.push({ fp, st: await fsp.stat(fp) }); } catch { /* */ }
+    }));
+    files.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
+    const sessions = [];
+    for (const f of files.slice(0, 40)) {
+      try {
+        const s = await parseClaudeSession(f.fp, f.st);
+        // 空会话（无人打过字、也没标题）多半是探测/崩溃残留，列出来只添乱
+        if (!s.title && !s.userMsgs) continue;
+        sessions.push({ id: s.id, title: s.title, name: names[s.id] || '', lastT: s.lastT, userMsgs: s.userMsgs });
+      } catch { /* 单文件解析失败不拖累整个项目 */ }
+    }
+    if (!sessions.length) return;
+    sessions.sort((a, b) => b.lastT - a.lastT);
+    projects.push({ path: pj.path, name: pj.name, lastActive: pj.lastActive, sessions });
+  }));
+  projects.sort((a, b) => b.lastActive - a.lastActive);
+  return {
+    ok: true,
+    resumeCmd: cfg.sessionResumeCmd || SESS_RESUME_DEFAULT,
+    newCmd: cfg.sessionNewCmd || SESS_NEW_DEFAULT,
+    projects,
+  };
+}
+
 // ---------- Skills 透视（本机 agent skills 的扫描 / 触发统计 / 健康检查 / 启停）----------
 // 扫描五类来源：~/.claude/skills、最近 agent 项目的 .claude/skills、Claude 插件、
 // ~/.codex/skills、~/.agents/skills。触发统计读两家的会话日志。
@@ -2694,6 +2735,24 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/agent-projects') {
       return sendJSON(res, 200, await agentProjects());
+    }
+    // ==== 二开: cockpit ====
+    if (p === '/api/agent-sessions') {
+      return sendJSON(res, 200, await agentSessions());
+    }
+    if (p === '/api/session-name' && req.method === 'POST') {
+      const b = await readBody(req);
+      if (!b || !b.id) return sendJSON(res, 200, { ok: false, error: 'missing id' });
+      await updateConfig((c) => {
+        const m = c.sessionNames || {};
+        const name = String(b.name || '').trim().slice(0, 80);
+        if (name) m[b.id] = name; else delete m[b.id];
+        // 按插入序裁掉最老的，防止 map 无限膨胀
+        const keys = Object.keys(m);
+        if (keys.length > 300) for (const k of keys.slice(0, keys.length - 300)) delete m[k];
+        c.sessionNames = m;
+      });
+      return sendJSON(res, 200, { ok: true });
     }
     if (p === '/api/skills') {
       return sendJSON(res, 200, await skillsData());

@@ -1409,3 +1409,32 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 /* 回放入口发现点：有录像时按钮右上角一个小红点 */
 #term-replay { position: relative; }
 #term-replay.has-rec::after { content: ''; position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border-radius: 50%; background: #e5484d; }
+
+/* ==== 二开: cockpit —— 驾驶舱布局 + 侧栏 session 列表 ==== */
+/* 布局：文件区/分隔条隐藏（代码照常运行），终端吃满主区 */
+#app.cockpit #filemgmt, #app.cockpit #terminal-resizer { display: none !important; }
+#app.cockpit #terminal-panel { flex: 1 1 auto !important; width: auto !important; height: auto !important; }
+/* 顶栏：文件向工具全部藏掉，只留侧栏折叠按钮 + 面包屑（当前落点路径提示） */
+#app.cockpit .topbar-actions > * { display: none; }
+/* 终端头：铺满/停靠/收起/文件跟随在驾驶舱里没有意义 */
+#app.cockpit #term-max, #app.cockpit #term-dock, #app.cockpit #term-close, #app.cockpit #file-follow { display: none; }
+
+/* 项目行：twirl 控制会话列表开合 */
+.proj-li .twirl { font-size: 9px; }
+
+/* session 行 */
+.sess-list { padding-left: 20px; }
+.sess-li { position: relative; }
+.sess-li .sess-dot { flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); opacity: 0.4; }
+.sess-li .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-li.sess-closed { color: var(--text-faint); }
+.sess-li.sess-open { color: var(--text); font-weight: 600; }
+.sess-li.sess-open .sess-dot { background: var(--green, #3fb950); opacity: 1; animation: tabpulse 1.1s ease-in-out infinite; }
+.sess-li .sess-edit { margin-left: auto; flex-shrink: 0; opacity: 0; font-size: 11px; padding: 0 2px; border-radius: 3px; }
+.sess-li:hover .sess-edit { opacity: 0.6; }
+.sess-li .sess-edit:hover { opacity: 1; color: var(--accent); background: var(--bg-3); }
+
+/* 折叠展开 / 新会话 两个动作行 */
+.sess-more, .sess-new { color: var(--text-faint); font-size: 11.5px; }
+.sess-more:hover, .sess-new:hover { color: var(--accent); }
+.sess-new .sess-plus { width: 13px; text-align: center; flex-shrink: 0; }
