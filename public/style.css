@@ -41,6 +41,16 @@
   --radius: 0px; --shadow: 0 8px 30px rgba(0, 0, 0, 0.22);
   --font-display: var(--font-ui); --font-fname: ui-monospace, "SF Mono", Menlo, monospace;
 }
+/* ===== 二开: 皮肤 4 · 蓝莓 Adeberry（移植自 Warp 官方 Adeberry，青灰黑底 × 钢蓝 accent）===== */
+[data-theme="adeberry"] {
+  --bg: #1d2022; --bg-2: #24282b; --bg-3: #2c3134; --panel: #202426;
+  --border: #33393d; --rule: #33393d;
+  --text: #e4eef5; --text-dim: #9aa7b0; --text-faint: #5f6b73;
+  --accent: #6c96b4; --accent-soft: #6c96b426; --accent-ink: #10171c;
+  --green: #57c78a; --yellow: #c8a35a;
+  --radius: 8px; --shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  --font-display: var(--font-ui); --font-fname: var(--font-ui);
+}
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -861,6 +871,10 @@ kbd {
   --crepe-color-surface: #16180f; --crepe-color-surface-low: #1c1f15;
   --crepe-color-inline-code: #e8825b; --crepe-shadow-1: 0 1px 3px rgba(0,0,0,.5); --crepe-shadow-2: 0 4px 14px rgba(0,0,0,.55);
 }
+[data-theme="adeberry"] .crepe-host .milkdown {
+  --crepe-color-surface: #24282b; --crepe-color-surface-low: #2c3134;
+  --crepe-color-inline-code: #c76156; --crepe-shadow-1: 0 1px 3px rgba(0,0,0,.5); --crepe-shadow-2: 0 4px 14px rgba(0,0,0,.55);
+}
 
 /* 图片编辑器 */
 .imgedit-tools { display: flex; align-items: center; gap: 8px; padding: 4px 0 10px; flex-wrap: wrap; }
@@ -1232,7 +1246,9 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
   box-shadow: 0 0 0 0.5px rgba(0,0,0,0.12), 0 12px 40px rgba(0,0,0,0.22) !important;
 }
 [data-theme="terminal"] .cmdk-panel, [data-theme="terminal"] .input-dialog,
-[data-theme="terminal"] .context-menu, [data-theme="terminal"] .guide-card {
+[data-theme="terminal"] .context-menu, [data-theme="terminal"] .guide-card,
+[data-theme="adeberry"] .cmdk-panel, [data-theme="adeberry"] .input-dialog,
+[data-theme="adeberry"] .context-menu, [data-theme="adeberry"] .guide-card {
   box-shadow: 0 0 0 0.5px rgba(0,0,0,0.5), 0 14px 44px rgba(0,0,0,0.5) !important;
 }
 

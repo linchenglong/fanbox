@@ -19,6 +19,8 @@ window.FANBOX_DICT = {
   '暖色纸感档案馆': 'Warm paper archive',
   '终端核 Volt': 'Terminal-core Volt',
   '编辑式 · 索引日报': 'Editorial · index daily',
+  '蓝莓': 'Adeberry',
+  '蓝莓 Adeberry · 移植自 Warp': 'Adeberry · ported from Warp',
   '本地运行 · 数据不出本机': 'Runs locally · data never leaves this Mac',
   // 侧栏「离开电脑」电源开关 + 版本号
   '离开电脑': 'Away from Mac',
