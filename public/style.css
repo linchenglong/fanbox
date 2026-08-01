@@ -1126,6 +1126,12 @@ kbd {
 .term-tab .tab-dot.st-waiting { background: #ff9f43; }
 .term-tab .tab-dot.st-background { background: #a78bfa; }
 .term-tab .tab-dot.st-done { background: var(--green, #3fb950); opacity: 0.85; }
+/* ==== 二开: tab 拖拽排序的视觉反馈 ==== */
+.term-tab.tab-dragging { opacity: 0.4; }
+.term-tab.tab-drop-side { position: relative; }
+.term-tab.tab-drop-side::before { content: ''; position: absolute; top: 2px; bottom: 2px; width: 2px; background: var(--accent); border-radius: 1px; }
+.term-tab.tab-drop-side.left::before { left: -3px; }
+.term-tab.tab-drop-side.right::before { right: -3px; }
 .term-tab.unread:not(.active) { color: var(--text); }
 .term-tab.unread:not(.active) .tab-dot.idle { background: var(--accent); opacity: 1; }
 @keyframes tabpulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }

@@ -2322,18 +2322,22 @@ function adoptLiveSessions() {
   syncSessTabTitles(); // 收养后 tab 标题跟上会话名
 }
 
-// claude 退出回到裸 shell → 摘标签，session 变灰。刚开的 tab 给 15s 宽限（claudex 可能还没起来）
+// claude 退出 → 摘标签，session 变灰，标题回落目录名。
+// 不用 isPlainShell（node-pty 的 proc 读前台进程组长名——claudex 包装脚本不 exec 时组长是 zsh，
+// claude 活着也返回 'zsh'，会把标签全误摘、标题闪回目录名）。改用注册表反查：
+// /api/session-host 走 ~/.claude/sessions/<PID>.json + ps 探活，claude 死了注册表进程就没了，权威。
 async function checkSessionTabsAlive() {
   let changed = false;
   for (const t of term.sessions) {
-    if (t.dead || (!t.claudeSessionId && !t.claudeProj)) continue;
-    if (Date.now() - (t.sessSpawnT || 0) < 15000) continue;
+    if (t.dead || !t.claudeSessionId) continue;
+    if (Date.now() - (t.sessSpawnT || 0) < 15000) continue; // 刚开的 tab 给 15s 宽限（claudex 可能还没起来）
     try {
-      if (await term.isPlainShell(t)) {
+      const h = await api('/api/session-host?id=' + encodeURIComponent(t.claudeSessionId));
+      if (h && h.ok && !h.open) {
         t.claudeSessionId = null; t.claudeProj = null; changed = true;
-        t.title = baseOf(t.cwd || t.startDir || '') || 'shell'; // claude 退了，标题回落到目录名
+        t.title = baseOf(t.cwd || t.startDir || '') || 'shell';
       }
-    } catch { /* 查不到前台进程就当没变化 */ }
+    } catch { /* 服务端没起来就当没变化 */ }
   }
   if (changed) { refreshSessionOpenState(); term.renderTabs(); }
 }
@@ -3083,6 +3087,7 @@ function bindEvents() {
   const tp = $('#terminal-panel');
   tp.addEventListener('dragover', (ev) => {
     const t = ev.dataTransfer.types;
+    if (t.includes('application/x-fanbox-tab')) return; // ==== 二开 ==== tab 排序拖拽，不是文件投喂
     if (!t.includes('Files') && !t.includes('application/x-fanbox-path') && !t.includes('text/plain')) return;
     ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; tp.classList.add('term-drop');
   });
@@ -3824,6 +3829,9 @@ const term = {
   },
   // 该会话前台是不是裸 shell？判断不了一律按「不是」处理——宁可新开标签，也不往运行中的程序里打字
   async isPlainShell(s) {
+    // ==== 二开: cockpit ==== 挂着 claude 会话标签的 tab 一律不算裸 shell：claudex 包装脚本不 exec，
+    // 前台进程组长是 zsh，node-pty 的 proc 会误报 'zsh'（claude 明明活着）——别把命令打进 claude 里
+    if (s.claudeSessionId) return false;
     try {
       const r = await window.fanboxPty.proc(s.id);
       if (!r || !r.ok || !r.proc) return false;
@@ -4492,6 +4500,36 @@ const term = {
       t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${eye}${zap}${ic('term', `hsl(${hue} 62% 48%)`, 12)}<span>${escapeHtml(s.title)}</span><span class="tab-x" title="关闭">✕</span>`;
       t.onclick = (e) => { if (e.target.classList.contains('tab-x')) { this.closeTab(s.id); return; } this.activate(s.id); };
       t.ondblclick = (e) => { if (e.target.classList.contains('tab-x')) return; this.locateCwd(); };
+      // ==== 二开: tab 拖拽排序（HTML5 drag，只重排 sessions 数组，PTY/xterm 实例不动）====
+      t.draggable = true;
+      t.dataset.tid = s.id;
+      t.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('application/x-fanbox-tab', s.id);
+        e.dataTransfer.effectAllowed = 'move';
+        t.classList.add('tab-dragging');
+      });
+      t.addEventListener('dragend', () => { t.classList.remove('tab-dragging'); bar.querySelectorAll('.tab-drop-side').forEach((x) => x.classList.remove('tab-drop-side', 'left', 'right')); });
+      t.addEventListener('dragover', (e) => {
+        if (![...e.dataTransfer.types].includes('application/x-fanbox-tab')) return;
+        e.preventDefault(); e.stopPropagation(); // 别让终端面板的「插入路径」高亮抢戏
+        e.dataTransfer.dropEffect = 'move';
+        const before = e.offsetX < t.offsetWidth / 2;
+        t.classList.add('tab-drop-side'); t.classList.toggle('left', before); t.classList.toggle('right', !before);
+      });
+      t.addEventListener('dragleave', () => t.classList.remove('tab-drop-side', 'left', 'right'));
+      t.addEventListener('drop', (e) => {
+        const srcId = e.dataTransfer.getData('application/x-fanbox-tab');
+        if (!srcId || srcId === s.id) return;
+        e.preventDefault(); e.stopPropagation();
+        const from = this.sessions.findIndex((x) => x.id === srcId);
+        let to = this.sessions.findIndex((x) => x.id === s.id);
+        if (from === -1 || to === -1) return;
+        const before = e.offsetX < t.offsetWidth / 2;
+        const [moved] = this.sessions.splice(from, 1);
+        to = this.sessions.findIndex((x) => x.id === s.id); // splice 后重新定位
+        this.sessions.splice(before ? to : to + 1, 0, moved);
+        this.renderTabs();
+      });
       bar.appendChild(t);
     });
     // ==== 二开: cockpit ==== tab 的开/关/换目录都路过这里，顺手翻新侧栏 session 高亮
