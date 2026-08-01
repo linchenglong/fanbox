@@ -3995,6 +3995,27 @@ const term = {
       try { const U = window.Unicode11Addon.Unicode11Addon || window.Unicode11Addon; xterm.loadAddon(new U()); xterm.unicode.activeVersion = '11'; } catch { /* */ }
     }
     xterm.open(host);
+    // ==== 二开: 滚轮接管 —— xterm 对像素级滚动（Mac 触控板/鼠标）有内部 0.3 折扣 + 平滑逻辑，
+    // scrollSensitivity 倍率被吃掉大半，「调多少都一样」。attachCustomWheelEventHandler 只覆盖
+    // TUI 鼠标上报路径、不覆盖 Viewport 的普通滚动（实测 handler 不触发），所以在宿主元素
+    // capture 阶段直接拦：deltaY 像素 ÷ 单元格高 × 灵敏度 = 行数，scrollLines 到位。
+    // 两种情况放行给 xterm 原生：① TUI 开了鼠标上报（滚轮要转发给程序）② alt-screen 无回滚
+    //（less/TUI 场景，xterm 会把滚轮翻译成方向键，不能截胡）。
+    host.addEventListener('wheel', (ev) => {
+      try {
+        if (xterm.modes.mouseTrackingMode !== 'none') return;
+        if (xterm.buffer.active.type === 'alternate') return;
+        if (ev.deltaMode !== WheelEvent.DOM_DELTA_PIXEL || ev.deltaY === 0) return;
+        const sens = Number(localStorage.getItem('fb_term_scroll')) || 3;
+        const cell = (() => { try { return xterm._core._renderService.dimensions.css.cell.height || 20; } catch { return 20; } })();
+        const mult = ev.altKey ? sens * 5 : sens; // Alt 快滚保持 ×5 约定
+        sess._wheelAcc = (sess._wheelAcc || 0) + (ev.deltaY / cell) * mult;
+        const lines = Math.trunc(sess._wheelAcc);
+        if (lines) { sess._wheelAcc -= lines; xterm.scrollLines(lines); }
+        ev.preventDefault();
+        ev.stopImmediatePropagation(); // 不让 Viewport 的原生滚动再叠加一次
+      } catch { /* 内部 API 变了就放行原生滚动 */ }
+    }, { capture: true, passive: false });
     // WebGL 渲染加速（大输出/TUI 不掉帧），失败或上下文丢失回退 DOM
     // 诊断开关：控制台跑 fbWebgl(false) 关掉 WebGL（用 DOM renderer）排查 CJK 残影乱码，fbWebgl(true) 恢复，需新开标签生效
     const webglOff = (() => { try { return localStorage.getItem('fanbox.noWebgl') === '1'; } catch { return false; } })();
