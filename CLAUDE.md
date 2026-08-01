@@ -29,7 +29,8 @@ grep -n "==== 二开" server.js public/app.js public/style.css electron/main.js 
 | open 探活 / 防双开 | `liveClaudeSessionIds`、`/api/session-host`（ps eww 读 FANBOX_TERM_ID） | `refreshSessionOpenState`、`openSession` 三级判定 |
 | tab 会话名标题 / 置顶 | — | `syncSessTabTitles`、`togglePinSession`（⋯ 菜单） |
 | 蓝莓皮肤 Adeberry | — | `[data-theme="adeberry"]`（色值源自 Warp 官方） |
-| 终端字体/垫图/滚速 | — | `term.setFont`/`term.setBg`、host capture 滚轮接管、⚙ 设置面板 |
+| 终端字体/垫图/滚速 | — | `term.setFont`/`term.setBg`、host capture 滚轮接管（TUI 走 SGR 上报合成）、⚙ 设置面板 |
+| tab 拖拽排序 | — | renderTabs 内 HTML5 drag（x-fanbox-tab 类型隔离文件投喂） |
 | 选图对话框桥 | electron `ui:pick-image` | `window.fanboxUi.pickImage` |
 
 ## 配置键速查
@@ -44,6 +45,7 @@ grep -n "==== 二开" server.js public/app.js public/style.css electron/main.js 
 - 上游 README/CHANGELOG 不要改（月更多次必冲突），二开叙事一律写 docs/FORK.md
 - 开发实例带 CDP 调试：`npx electron . --remote-debugging-port=9223`；kill npx 包装进程杀不掉 Electron 本体，要 `lsof -nP -iTCP:4567 -sTCP:LISTEN -t | xargs kill`
 - **PTY spawn 必须清 CLAUDECODE 等污染环境变量**（electron/main.js `pty:spawn` 已做）。FanBox 若跑在 claude 会话里（Agent 驱动开发），process.env 带 `CLAUDECODE`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_ENTRYPOINT`/`CLAUDE_CODE_EXECPATH`，终端 PTY 继承后里面起的 claude 会以为自己是父会话的子 agent，**不往自己 session 的 jsonl 写对话**（只写 mode 元信息）→ 对话内容丢失、`claudex -r <id>` 找不到会话。经验源自 warp自定义/CLAUDE.md「☠️ 启动 GUI 必须清环境变量」节
+- **node-pty 的 `proc` 判不了「claude 在不在跑」**：claudex 包装脚本末行不带 `exec`，前台进程组长是 zsh，claude 活着 proc 也返回 `'zsh'`。判 claude 存亡用 `/api/session-host`（注册表+ps 探活）；`isPlainShell` 对挂会话标签的 tab 必须直接 false
 
 ## 验证习惯
 

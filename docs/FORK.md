@@ -55,7 +55,7 @@
 
 - **字体可配置**：⚙ 设置面板「字体」行，家族 + 字号（9–32），全 tab 即时生效。默认 PT Mono 18px；用户字体打头、皮肤 Nerd Font 链殿后兜 powerline 字形
 - **字重默认 500**：DPR=1 外接屏上 xterm canvas 灰度抗锯齿偏细发虚（对比 CoreText 渲染的 Warp 明显），合成加粗半档补回观感
-- **滚轮速度可调**（b1c2952 重做）：设置面板「滚速」滑杆 1–15 倍，`fb_term_scroll`。xterm 对像素级滚动有内部 0.3 折扣+平滑，`scrollSensitivity` 调不动（实测各档全是 2 行/格）；`attachCustomWheelEventHandler` 只覆盖 TUI 鼠标上报路径、普通滚动不经过（API 文档失实）。最终在宿主元素 capture 阶段拦截：deltaY÷单元格高×灵敏度=行数直接 `scrollLines`，受控实测 1/3/10 档滚 10/30/100 行全线性。TUI 鼠标上报与 alt-screen（less 等）放行原生
+- **滚轮速度可调**（b1c2952 + 2be8a44 两轮重做）：设置面板「滚速」滑杆 1–15 倍，`fb_term_scroll`。xterm 对像素级滚动有内部 0.3 折扣+平滑，`scrollSensitivity` 调不动（实测各档全是 2 行/格）；`attachCustomWheelEventHandler` 只覆盖 TUI 鼠标上报路径、普通滚动不经过（API 文档失实）。最终在宿主元素 capture 阶段统一积分（deltaY÷单元格高×灵敏度=行数），按场景分发：①普通 shell → `scrollLines` 直接滚（实测 1/3/10 档滚 10/30/100 行全线性）②claude code 等 TUI 开鼠标上报 → 按行数合成 SGR(1006) 滚轮上报序列发给程序（claude 每收一个上报滚固定行数，数量即速度；单事件 60 封顶防触控板甩尾洪泛；实测 cat -v 收到成串 `^[[<64;x;yM`）③less 等 alt-screen 无上报 → 放行 xterm 原生「滚轮转方向键」
 - **皮肤垫图**：设置面板「皮肤」行——系统对话框选图（electron `ui:pick-image` 桥）+ 半透明黑蒙版滑杆（0–95%，默认 60%）+ 清除。有图时 xterm 画布走透明（`allowTransparency`），图/蒙版由 `#xterm-host` CSS 承担
 - **侧栏文字提亮**：条目一律主文字色，仅未打开会话置灰（8bab389, 2f0b54c）
 
@@ -74,9 +74,13 @@
 - **置顶**：侧栏 ✎ 改为 ⋯ 菜单（重命名/置顶），置顶存 localStorage `fb_sess_pinned`，项目内置顶组排最前带 📌
 - **⌘+Enter 只发一次**：`attachCustomKeyEventHandler` 对同一按键收 keydown/keyup 两个事件，只在 keydown 发 ESC+CR（此前换两行）
 
+### 9. v1.3 修复（f82a684, 2be8a44）
+
+- **tab 标题被误摘回目录名**：`claudex` 包装脚本末行不带 `exec`，PTY 前台进程组长是 zsh——node-pty 的 `proc` 对跑着 claude 的 tab 返回 `'zsh'` → `isPlainShell` 误判裸 shell → 20s 轮询摘标签、标题闪回目录名。改用 `/api/session-host` 注册表探活判 claude 存亡（权威）；`isPlainShell` 对挂标签 tab 直接返回 false（否则 `launchAgent` 会把启动命令打进正在跑的 claude 里）
+- **tab 拖拽排序**：HTML5 drag 重排 `sessions` 数组（PTY/xterm 实例不动），落点竖线指示 + 半透明拖影；与「拖文件进终端」的高亮按 dataTransfer 类型隔离
+
 ## 已知限制
 
-- TUI（claude/codex）接管鼠标上报时，滚轮步长由程序自己决定，灵敏度设置不生效（终端协议使然，Warp 同）
 - xterm canvas 渲染与 CoreText 存在先天字形差异，字重 500 追回约九成观感
 - `npm run dist` 需先改掉 package.json 里原作者的签名配置（`identity`/`notarize`/`appId`）
 - Codex/kimi/opencode 的会话不进侧栏（只做 Claude）
