@@ -4006,22 +4006,37 @@ const term = {
     // ==== 二开: 滚轮接管 —— xterm 对像素级滚动（Mac 触控板/鼠标）有内部 0.3 折扣 + 平滑逻辑，
     // scrollSensitivity 倍率被吃掉大半，「调多少都一样」。attachCustomWheelEventHandler 只覆盖
     // TUI 鼠标上报路径、不覆盖 Viewport 的普通滚动（实测 handler 不触发），所以在宿主元素
-    // capture 阶段直接拦：deltaY 像素 ÷ 单元格高 × 灵敏度 = 行数，scrollLines 到位。
-    // 两种情况放行给 xterm 原生：① TUI 开了鼠标上报（滚轮要转发给程序）② alt-screen 无回滚
-    //（less/TUI 场景，xterm 会把滚轮翻译成方向键，不能截胡）。
+    // capture 阶段直接拦，统一积分：deltaY 像素 ÷ 单元格高 × 灵敏度 = 行数。
+    // 三种去向：① 普通 shell → scrollLines 直接滚 ② TUI 开鼠标上报（claude code 等）→ 合成
+    // SGR 滚轮上报序列按行数发给程序（claude 每收一个上报滚固定行数，放大数量=放大速度，
+    // 这就是「进 claude 后调速不生效」的修法）③ alt-screen 无上报（less 裸滚）→ 放行 xterm
+    // 原生的「滚轮转方向键」路径。
     host.addEventListener('wheel', (ev) => {
       try {
-        if (xterm.modes.mouseTrackingMode !== 'none') return;
-        if (xterm.buffer.active.type === 'alternate') return;
         if (ev.deltaMode !== WheelEvent.DOM_DELTA_PIXEL || ev.deltaY === 0) return;
+        const mouseOn = xterm.modes.mouseTrackingMode !== 'none';
+        if (!mouseOn && xterm.buffer.active.type === 'alternate') return; // ③ less 等：原生转方向键
         const sens = Number(localStorage.getItem('fb_term_scroll')) || 3;
-        const cell = (() => { try { return xterm._core._renderService.dimensions.css.cell.height || 20; } catch { return 20; } })();
+        const dims = (() => { try { return xterm._core._renderService.dimensions.css.cell; } catch { return null; } })();
+        const cellH = (dims && dims.height) || 20, cellW = (dims && dims.width) || 10;
         const mult = ev.altKey ? sens * 5 : sens; // Alt 快滚保持 ×5 约定
-        sess._wheelAcc = (sess._wheelAcc || 0) + (ev.deltaY / cell) * mult;
+        sess._wheelAcc = (sess._wheelAcc || 0) + (ev.deltaY / cellH) * mult;
         const lines = Math.trunc(sess._wheelAcc);
-        if (lines) { sess._wheelAcc -= lines; xterm.scrollLines(lines); }
+        if (lines) {
+          sess._wheelAcc -= lines;
+          if (mouseOn) {
+            // ② 合成 SGR(1006) 滚轮上报：64=上滚 65=下滚，坐标取鼠标所在单元格（现代 TUI 全用 SGR）
+            const rect = host.getBoundingClientRect();
+            const col = Math.min(xterm.cols, Math.max(1, Math.floor((ev.clientX - rect.left) / cellW) + 1));
+            const row = Math.min(xterm.rows, Math.max(1, Math.floor((ev.clientY - rect.top) / cellH) + 1));
+            const seq = `\x1b[<${lines < 0 ? 64 : 65};${col};${row}M`;
+            window.fanboxPty.input(sess.id, seq.repeat(Math.min(60, Math.abs(lines)))); // 单事件封顶，防触控板甩尾洪泛
+          } else {
+            xterm.scrollLines(lines); // ① 普通 scrollback
+          }
+        }
         ev.preventDefault();
-        ev.stopImmediatePropagation(); // 不让 Viewport 的原生滚动再叠加一次
+        ev.stopImmediatePropagation(); // 拦死 xterm 原生路径，不叠加不重复上报
       } catch { /* 内部 API 变了就放行原生滚动 */ }
     }, { capture: true, passive: false });
     // WebGL 渲染加速（大输出/TUI 不掉帧），失败或上下文丢失回退 DOM
