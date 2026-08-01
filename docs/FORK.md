@@ -55,7 +55,7 @@
 
 - **字体可配置**：⚙ 设置面板「字体」行，家族 + 字号（9–32），全 tab 即时生效。默认 PT Mono 18px；用户字体打头、皮肤 Nerd Font 链殿后兜 powerline 字形
 - **字重默认 500**：DPR=1 外接屏上 xterm canvas 灰度抗锯齿偏细发虚（对比 CoreText 渲染的 Warp 明显），合成加粗半档补回观感
-- **滚轮灵敏度 3 倍**（一格 ≈6 行），Alt+滚轮再 ×5；`fb_term_scroll` 可调
+- **滚轮速度可调**（b1c2952 重做）：设置面板「滚速」滑杆 1–15 倍，`fb_term_scroll`。xterm 对像素级滚动有内部 0.3 折扣+平滑，`scrollSensitivity` 调不动（实测各档全是 2 行/格）；`attachCustomWheelEventHandler` 只覆盖 TUI 鼠标上报路径、普通滚动不经过（API 文档失实）。最终在宿主元素 capture 阶段拦截：deltaY÷单元格高×灵敏度=行数直接 `scrollLines`，受控实测 1/3/10 档滚 10/30/100 行全线性。TUI 鼠标上报与 alt-screen（less 等）放行原生
 - **皮肤垫图**：设置面板「皮肤」行——系统对话框选图（electron `ui:pick-image` 桥）+ 半透明黑蒙版滑杆（0–95%，默认 60%）+ 清除。有图时 xterm 画布走透明（`allowTransparency`），图/蒙版由 `#xterm-host` CSS 承担
 - **侧栏文字提亮**：条目一律主文字色，仅未打开会话置灰（8bab389, 2f0b54c）
 
@@ -65,6 +65,14 @@
 - **⌘+Enter / Shift+Enter 换行**：`attachCustomKeyEventHandler` 拦截后发 `ESC+CR`（=Option+Enter 等价序列），claude TUI 换行不提交；裸 Enter 仍提交
 - **work 项目丢失修复**：上游 `agentProjects` 老 bug——最新 jsonl 头 64KB 抓不到 `cwd` 字段就整个项目丢弃。新增 `cwdFromDirName`：从 munge 后的目录名拆 `-` 贪心匹配 + stat 验证还原真实路径（路径段含 `-` 时有歧义，stat 筛选错候选）
 - **PTY 清污染环境变量**（重要）：FanBox 若跑在 claude 会话里（Agent 驱动开发），`process.env` 带 `CLAUDECODE`/`CLAUDE_CODE_SESSION_ID` 等，终端 PTY 继承后里面起的 claude 以为自己是父会话子 agent，**不往自己 session 的 jsonl 写对话** → 内容丢失、`claudex -r <id>` 找不到。`pty:spawn` 前 `delete` 四个变量。经验源自 warp自定义/CLAUDE.md
+
+### 8. Session 交互强化（e338b66, 53f830c, c888578）
+
+- **防双开**：点击已打开的 session 三级判定——①前端标记的 tab 直接切换 ②未标记但会话开着：`GET /api/session-host?id=` 用 `ps eww` 读 claude 进程环境里的 `FANBOX_TERM_ID`（`pty:spawn` 注入）配对本地 tab，配上就切过去并补标记（手动敲 claudex 起的会话也能切回）；配不到 = 跑在 iTerm/Warp 等外部宿主，提示不双开（`claude -r` 双开写坏 jsonl，warp自定义/BLOCKED.md 教训）③真没开才新开 tab 续接
+- **tab 标题 = 会话名**：挂 claude 会话的 tab 显示会话名（自定义名>首条摘要，14 字截断），`syncSessTabTitles` 在打开/收养/改名/host 配对四节点同步；claude 退出回落目录名；上游 `refreshCwd` 的目录名覆盖对挂会话 tab 豁免
+- **tab 圆点四态同色**：挂 claude 会话的 tab 圆点用侧栏同款四态色（数据同源 `sessUI`），普通 shell tab 保持上游 busy/idle/dead 三态
+- **置顶**：侧栏 ✎ 改为 ⋯ 菜单（重命名/置顶），置顶存 localStorage `fb_sess_pinned`，项目内置顶组排最前带 📌
+- **⌘+Enter 只发一次**：`attachCustomKeyEventHandler` 对同一按键收 keydown/keyup 两个事件，只在 keydown 发 ESC+CR（此前换两行）
 
 ## 已知限制
 

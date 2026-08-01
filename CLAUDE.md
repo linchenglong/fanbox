@@ -25,16 +25,17 @@ grep -n "==== 二开" server.js public/app.js public/style.css electron/main.js 
 |---|---|---|
 | cockpit 布局（隐藏文件区） | — | app.js `applyCockpit`/`fbCockpit`，style.css `#app.cockpit` |
 | 侧栏 session 列表 | `/api/agent-sessions`、`/api/session-name` | app.js `loadAgentProjects`/`sessLi`/`openSession` |
-| 四态状态圆点 | `decideSessionStatus`（jsonl 判定） | `SESS_STATUS`、`.sess-dot.st-*` |
-| open 探活 | `liveClaudeSessionIds`（~/.claude/sessions 注册表 + ps） | `refreshSessionOpenState` |
+| 四态状态圆点（侧栏+tab 同源） | `decideSessionStatus`（jsonl 判定） | `SESS_STATUS`、`.sess-dot.st-*`、`.tab-dot.st-*` |
+| open 探活 / 防双开 | `liveClaudeSessionIds`、`/api/session-host`（ps eww 读 FANBOX_TERM_ID） | `refreshSessionOpenState`、`openSession` 三级判定 |
+| tab 会话名标题 / 置顶 | — | `syncSessTabTitles`、`togglePinSession`（⋯ 菜单） |
 | 蓝莓皮肤 Adeberry | — | `[data-theme="adeberry"]`（色值源自 Warp 官方） |
-| 终端字体/垫图/滚轮 | — | `term.setFont`/`term.setBg`、⚙ 设置面板 |
+| 终端字体/垫图/滚速 | — | `term.setFont`/`term.setBg`、host capture 滚轮接管、⚙ 设置面板 |
 | 选图对话框桥 | electron `ui:pick-image` | `window.fanboxUi.pickImage` |
 
 ## 配置键速查
 
 - `~/.fanbox/config.json`：`sessionResumeCmd`（默认 `claudex -r {id}`）、`sessionNewCmd`（默认 `claudex`）、`sessionNames`（改名 map）、`sessionActiveWindowMs`（running 活跃窗，默认 60000）
-- localStorage：`fb_cockpit`、`fb_term_font`（默认 PT Mono）、`fb_term_fontsize`（默认 18）、`fb_term_fontweight`（默认 500）、`fb_term_scroll`（默认 3）、`fb_term_bgimg`/`fb_term_bgmask`（垫图）
+- localStorage：`fb_cockpit`、`fb_term_font`（默认 PT Mono）、`fb_term_fontsize`（默认 18）、`fb_term_fontweight`（默认 500）、`fb_term_scroll`（滚速 1-15，默认 3）、`fb_term_bgimg`/`fb_term_bgmask`（垫图）、`fb_sess_pinned`（置顶）
 
 ## 踩坑警示（违反必翻车）
 
