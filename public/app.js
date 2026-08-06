@@ -2099,6 +2099,7 @@ async function loadAgentProjects() {
   // 置顶的排到各自项目最前（组内仍按 lastT 降序——服务端已排好，stable sort 保序）
   sessUI.projects.forEach((p) => p.sessions.sort((a, b) => (sessUI.pinned.has(b.id) ? 1 : 0) - (sessUI.pinned.has(a.id) ? 1 : 0)));
   adoptLiveSessions();
+  adoptByHost(); // 异步不 await：手动/还原 tab 靠注册表反查补标记，认上后自己刷标题
   checkSessionTabsAlive(); // 异步不 await：结果出来自己补高亮
   syncSessTabTitles(); // tab 标题跟随会话名（含 AI 自动命名的更新）
   // 数据没变就不动 DOM，免得定时刷新抹掉用户的展开状态
@@ -2320,6 +2321,35 @@ function adoptLiveSessions() {
     }
   });
   syncSessTabTitles(); // 收养后 tab 标题跟上会话名
+}
+
+// ==== 二开: cockpit ==== 反向认领：手动敲 claudex / 重启还原的 tab 没有 claudeSessionId 标记，
+// adoptLiveSessions 只认 claudeProj 轮不到它——侧栏名字换了 tab 标题却不动，点一下侧栏才补上。
+// 用注册表反查（/api/session-host 读 FANBOX_TERM_ID → tab id）自动补标记，不用等用户点击。
+async function adoptByHost() {
+  if (adoptByHost._busy) return; // 15s 轮询防重入
+  adoptByHost._busy = true;
+  try {
+    const claimed = sessionOpenIds();
+    if (!term.sessions.some((t) => !t.dead && !t.claudeSessionId)) return; // 没有待认领的 tab
+    let adopted = false;
+    for (const p of sessUI.projects) {
+      for (const s of p.sessions) {
+        if (!s.open || claimed.has(s.id)) continue; // 只查「开着但没 tab 认」的会话，通常 0-1 个
+        try {
+          const h = await api('/api/session-host?id=' + encodeURIComponent(s.id));
+          if (!h || !h.open || !h.termId) continue; // termId=null → 跑在 iTerm/Warp 等外部宿主
+          const t = term.sessions.find((x) => !x.dead && !x.claudeSessionId && x.id === h.termId);
+          if (!t) continue;
+          t.claudeSessionId = s.id;
+          t.claudeProj = p.path;
+          claimed.add(s.id);
+          adopted = true;
+        } catch { /* 单个查询失败下轮再试 */ }
+      }
+    }
+    if (adopted) { syncSessTabTitles(); refreshSessionOpenState(); }
+  } finally { adoptByHost._busy = false; }
 }
 
 // claude 退出 → 摘标签，session 变灰，标题回落目录名。
@@ -4098,6 +4128,16 @@ const term = {
         if (e.type === 'keydown') term.input(sess.id, '\x1b\r');
         return false;
       }
+      // ==== 二开: claude 输入框 ↑/↓ 边界增强 ==== 首/末行不在行首/行尾时先到行首/行尾，再按才翻历史
+      if (!cmd && !e.altKey && !e.shiftKey && !e.isComposing && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        const seq = term.arrowBoundary(sess, xterm, e.key);
+        if (seq) {
+          e.preventDefault();
+          if (e.type === 'keydown') term.input(sess.id, seq); // 只在 keydown 发，keyup 不重复
+          return false;
+        }
+        return true;
+      }
       if (cmd && (e.key === '=' || e.key === '+' || e.key === '0')) {
         e.preventDefault();
         const delta = e.key === '0' ? 0 : (e.key === '=' || e.key === '+' ? 1 : -1);
@@ -4416,6 +4456,41 @@ const term = {
       for (let i = Math.max(0, buf.length - n); i < buf.length; i++) { const ln = buf.getLine(i); if (ln) t += ln.translateToString(true) + '\n'; }
       return t;
     } catch { return ''; }
+  },
+  // ==== 二开: claude 输入框 ↑/↓ 边界增强 ====
+  // 原生行为：末行按 ↓ 不动；首行按 ↑ 直接翻历史。期望：首/末行但不在行首/行尾时，先到行首/行尾，
+  // 到了边界再按才翻历史。读屏判定（❯ 前缀 + ── 边框），返回要改发的序列（\x01=行首 \x05=行尾，
+  // claude 的 readline 快捷键），认不出的形态一律返回 false 放行原生键——最差退回原生行为
+  arrowBoundary(sess, xterm, key) {
+    if (!sess.claudeSessionId) return false; // 只对挂 claude 会话的 tab 生效
+    const buf = xterm.buffer.active;
+    if (buf.type === 'alternate') return false; // vim/less 等全屏程序不掺和
+    const abs = buf.baseY + buf.cursorY;
+    const rowText = (y) => { const l = buf.getLine(y); return l ? l.translateToString(true) : ''; };
+    const cur = rowText(abs);
+    const isBorder = (t) => /^[─╭╰]/.test(t.trimStart());
+    if (key === 'ArrowUp') {
+      if (!cur.startsWith('❯')) return false; // 光标不在输入框首行（含压根不在输入框）：放行
+      return buf.cursorX > 2 ? '\x01' : false; // 行首=「❯ 」之后的第 2 列，已在行首才翻历史
+    }
+    // ArrowDown：光标行须属于输入框（本行是 ❯ 行，或向上能追溯到 ❯ 行），且下一行是底边框 → 末行。
+    // 续行（含输入框里的空行）统一带两空格缩进前缀，非 "  " 开头即出框（translateToString(true)
+    // 只裁行尾空白，前导缩进保得住；输入框外的真空行是 ''，自然终止追溯）
+    let y = abs;
+    while (y >= 0 && !rowText(y).startsWith('❯')) {
+      if (!rowText(y).startsWith('  ')) return false;
+      y--;
+    }
+    if (y < 0) return false;
+    if (!isBorder(rowText(abs + 1))) return false; // 下一行不是底边框：不是末行，放行原生 ↓
+    // 行尾 = 最后一个非空单元格的右缘（CJK 宽字符占 2 列，getWidth 补齐）
+    const line = buf.getLine(abs);
+    let eol = 0;
+    for (let x = Math.min(xterm.cols, line ? line.length : 0) - 1; x >= 0; x--) {
+      const c = line.getCell(x);
+      if (c && c.getChars().trim()) { eol = x + (c.getWidth() || 1); break; }
+    }
+    return buf.cursorX < eol ? '\x05' : false; // 已在行尾才翻历史
   },
   // 轮到你了：终端边缘呼吸几秒，余光可感（agent 干完一段、把球踢回给你）
   awaitGlow() {
