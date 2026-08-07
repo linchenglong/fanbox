@@ -4464,9 +4464,11 @@ const term = {
   arrowBoundary(sess, xterm, key) {
     if (!sess.claudeSessionId) return false; // 只对挂 claude 会话的 tab 生效
     const buf = xterm.buffer.active;
-    if (buf.type === 'alternate') return false; // vim/less 等全屏程序不掺和
+    // 注意：claude TUI 本身就跑在 alternate screen，不能按 buf.type 排除 vim/less——
+    // 靠屏读特征（❯ 行 + 续行缩进 + 底边框）区分，vim/less 画不出这个组合
     const abs = buf.baseY + buf.cursorY;
-    const rowText = (y) => { const l = buf.getLine(y); return l ? l.translateToString(true) : ''; };
+    // claude 输入框的 ❯ 后缀与续行缩进用的是 NBSP（\xa0），归一化成普通空格再做前缀判断
+    const rowText = (y) => { const l = buf.getLine(y); return l ? l.translateToString(true).replace(/\xa0/g, ' ') : ''; };
     const cur = rowText(abs);
     const isBorder = (t) => /^[─╭╰]/.test(t.trimStart());
     if (key === 'ArrowUp') {
