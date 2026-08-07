@@ -1134,6 +1134,8 @@ kbd {
 .term-tab.tab-drop-side.right::before { right: -3px; }
 .term-tab.unread:not(.active) { color: var(--text); }
 .term-tab.unread:not(.active) .tab-dot.idle { background: var(--accent); opacity: 1; }
+/* ==== 二开: tab 文字颜色 ==== 选中=白、未选中=灰（压掉上面 unread 的整行提亮——未读感交给圆点；hover 仍提亮） */
+.term-tab.unread:not(.active):not(:hover) { color: var(--text-dim); }
 @keyframes tabpulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 /* 变更收件箱：徽章 + 浮层面板 */
 #btn-changes { position: relative; }
