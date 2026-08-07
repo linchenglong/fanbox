@@ -5,7 +5,7 @@
 ## 仓库与分支纪律
 
 - `origin` = linchenglong/fanbox（自己的 fork，可推）；`upstream` = alchaincyf/fanbox（**push 已物理禁用**，只读）
-- 主干是 `master`（沿上游命名）。开发一律 `feat/xxx` 分支 → 合回 master → 推 origin
+- 主干是 `master`（沿上游命名）。开发一律走分支（`feat/xxx`、`fix/xxx`）→ 合回 master → 推 origin
 - tag 规范：自己的交付 tag 带前缀 `<功能>-<期次>-v<SemVer>`（如 `cockpit-p1-v1.0.0`）；`base-<sha>` 是 fork 基线标记。裸 `vX.Y.Z` 全是上游的，不要动
 - 吃上游更新：`git fetch upstream && git merge upstream/master`，冲突集中在 app.js/style.css/server.js
 
@@ -27,7 +27,8 @@ grep -n "==== 二开" server.js public/app.js public/style.css electron/main.js 
 | 侧栏 session 列表 | `/api/agent-sessions`、`/api/session-name` | app.js `loadAgentProjects`/`sessLi`/`openSession` |
 | 四态状态圆点（侧栏+tab 同源） | `decideSessionStatus`（jsonl 判定） | `SESS_STATUS`、`.sess-dot.st-*`、`.tab-dot.st-*` |
 | open 探活 / 防双开 | `liveClaudeSessionIds`、`/api/session-host`（ps eww 读 FANBOX_TERM_ID） | `refreshSessionOpenState`、`openSession` 三级判定 |
-| tab 会话名标题 / 置顶 | — | `syncSessTabTitles`、`togglePinSession`（⋯ 菜单） |
+| tab 会话名标题 / 置顶 | — | `syncSessTabTitles`、`adoptByHost`（反向认领）、`togglePinSession`（⋯ 菜单） |
+| 输入框 ↑/↓ 边界移动 | — | app.js `arrowBoundary`（屏读判定，注意 NBSP 与 alt-screen 坑） |
 | 蓝莓皮肤 Adeberry | — | `[data-theme="adeberry"]`（色值源自 Warp 官方） |
 | 终端字体/垫图/滚速 | — | `term.setFont`/`term.setBg`、host capture 滚轮接管（TUI 走 SGR 上报合成）、⚙ 设置面板 |
 | tab 拖拽排序 | — | renderTabs 内 HTML5 drag（x-fanbox-tab 类型隔离文件投喂） |
@@ -49,4 +50,4 @@ grep -n "==== 二开" server.js public/app.js public/style.css electron/main.js 
 
 ## 验证习惯
 
-改完用 Playwright CDP 连 9223 实测（参考 git log 里各 commit 的验证方式），别只过语法。四态判定的试金石：本会话（FanBox 项目）在持续 tool_use 时应为 running/蓝点。
+改完用 Playwright CDP 连 9223 实测（参考 git log 里各 commit 的验证方式），别只过语法。四态判定的试金石：本会话（FanBox 项目）在持续 tool_use 时应为 running/蓝点。用户正在用的实例**不要重启**——CSS/纯函数可经 CDP `Runtime.evaluate` 注入热补实测（v1.3.1 的 ↑/↓ 修复即靠热补发现 NBSP 坑）。

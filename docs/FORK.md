@@ -79,6 +79,12 @@
 - **tab 标题被误摘回目录名**：`claudex` 包装脚本末行不带 `exec`，PTY 前台进程组长是 zsh——node-pty 的 `proc` 对跑着 claude 的 tab 返回 `'zsh'` → `isPlainShell` 误判裸 shell → 20s 轮询摘标签、标题闪回目录名。改用 `/api/session-host` 注册表探活判 claude 存亡（权威）；`isPlainShell` 对挂标签 tab 直接返回 false（否则 `launchAgent` 会把启动命令打进正在跑的 claude 里）
 - **tab 拖拽排序**：HTML5 drag 重排 `sessions` 数组（PTY/xterm 实例不动），落点竖线指示 + 半透明拖影；与「拖文件进终端」的高亮按 dataTransfer 类型隔离
 
+### 10. v1.3.1 交互打磨（5ea7611, 31436e3）
+
+- **tab 文字颜色**：选中白（`--text`）、未选中一律灰（`--text-dim`）——上游 unread 提亮整行文字的规则被压掉，未读感交给圆点；hover 仍提亮
+- **claude 输入框 ↑/↓ 边界移动**：首/末行但光标不在行首/行尾时，↑/↓ 先发 `\x01`/`\x05`（readline 行首/行尾）；已在边界才放行原生键翻历史。屏读判定：`❯` 行 + 续行两空格缩进 + 底边框。两个坑：**claude TUI 本身跑在 alternate screen**（不能按 `buf.type` 排除 vim/less，靠屏读特征区分）；**`❯` 后缀与续行缩进是 NBSP（\xa0）非普通空格**（`rowText` 统一归一化）。认不出的形态一律放行原生键，最差回退原生行为
+- **反向认领 `adoptByHost`**：手动敲 claudex / 重启还原的 tab 没有 `claudeSessionId` 标记，`adoptLiveSessions` 只认 `claudeProj` 轮不到它——发消息后侧栏名字换了 tab 标题不动。挂 15s 轮询：对「开着但没 tab 认领」的会话查 `/api/session-host`（FANBOX_TERM_ID 反查 tab id）自动补标记 + 刷标题。与第 8 节点击侧栏时的手动配对同一数据源，差别是不用等用户点击
+
 ## 已知限制
 
 - xterm canvas 渲染与 CoreText 存在先天字形差异，字重 500 追回约九成观感
