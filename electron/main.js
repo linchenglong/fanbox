@@ -596,6 +596,13 @@ ipcMain.handle('pty:spawn', (e, { id, cwd, cols, rows, theme }) => {
   // 写任何对话（只写 mode/permission-mode 元信息）→ 对话内容丢失、claudex -r <id> 找不到会话。
   // 证据见 warp自定义/CLAUDE.md「☠️ 启动 GUI 必须清环境变量」节。清掉后终端里的 claude 是独立进程，正常落盘。
   for (const k of ['CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH']) delete env[k];
+  // ==== 二开: TERM_PROGRAM 归属改写为 fanbox ====
+  // FanBox 若从 Terminal.app 里启动（npm start），process.env 带 TERM_PROGRAM=Apple_Terminal，PTY 继承下去后
+  // 里面的 claude 会以为宿主是 Apple Terminal：每次发通知前 osascript 查询 Terminal 的响铃设置——
+  // 若 Terminal.app 没在运行，这条 Apple Event 会把它直接拉起 → 「空终端随机弹出」。
+  // 归属改写为 fanbox（这才是事实）：claude 识别不了宿主就不发响铃通知，也不再碰 Terminal.app。
+  env.TERM_PROGRAM = 'fanbox';
+  delete env.TERM_PROGRAM_VERSION;
   if (!/UTF-8/i.test(env.LC_ALL || env.LC_CTYPE || env.LANG || '')) env.LANG = 'zh_CN.UTF-8';
   let p;
   try {
