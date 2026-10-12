@@ -1967,7 +1967,7 @@ async function claudeOfficialLimits() {
 
 // ---------- Agent 项目（最近被 coding agent 处理过的项目文件夹）----------
 // Claude Code：~/.claude/projects/<munge过的路径>/*.jsonl，目录名不可逆，但行里带 "cwd":"真实路径"
-// Codex：~/.codex/sessions/**/rollout-*.jsonl 开头的 session_meta 带 cwd
+// （二开：Codex 项目不收，侧栏只服务 Claude 会话）
 let agentProjCache = { at: 0, data: null };
 
 async function readCwdFromHead(file, bytes) {
@@ -2007,6 +2007,18 @@ async function cwdFromDirName(dirName) {
   return trySolve(0, '');
 }
 
+// ==== 二开: cockpit —— 会话文件 → 真实 cwd ====
+// claude 的目录名把每个非字母数字字符（含每个汉字）压成 '-'：BAA定位 与 BAA记忆 落在同一目录。
+// 目录名不是项目的身份证，文件头里的 cwd 才是；一个文件的 cwd 终身不变，读到就缓存（读不到不缓存）。
+const sessionCwdCache = new Map(); // fp -> cwd
+async function sessionFileCwd(fp) {
+  let cwd = sessionCwdCache.get(fp);
+  if (cwd) return cwd;
+  try { cwd = await readCwdFromHead(fp, 65536); } catch { cwd = null; }
+  if (cwd) sessionCwdCache.set(fp, cwd);
+  return cwd;
+}
+
 async function agentProjects(force = false) {
   if (!force && agentProjCache.data && Date.now() - agentProjCache.at < 60000) return agentProjCache.data;
   const cutoff = Date.now() - 30 * 86400000;
@@ -2018,54 +2030,31 @@ async function agentProjects(force = false) {
     cur.agents.add(agent);
     map.set(cwd, cur);
   };
-  // Claude Code：每个项目目录取最新的 jsonl，从文件头抓 cwd
+  // ==== 二开: cockpit ==== 只收 Claude 项目（侧栏只服务 Claude 会话，Codex 项目白占名额）；
+  // 每个会话文件各自按头部 cwd 归属——同一个目录可能混着多个项目，见 sessionFileCwd
   try {
     const dirs = await fsp.readdir(CLAUDE_PROJ);
     await Promise.all(dirs.map(async (d) => {
       const base = path.join(CLAUDE_PROJ, d);
       let names; try { names = await fsp.readdir(base); } catch { return; }
-      let newest = null;
+      // 文件头读不到 cwd（前 64KB 没 cwd 行）时从目录名反解兜底，每目录最多算一次，
+      // 避免 work 这种「头部全是 thinking/tool_use」的项目整条丢失
+      let guess;
       await Promise.all(names.filter((n) => n.endsWith('.jsonl')).map(async (n) => {
         try {
-          const st = await fsp.stat(path.join(base, n));
-          if (!newest || st.mtimeMs > newest.mtimeMs) newest = { fp: path.join(base, n), mtimeMs: st.mtimeMs };
+          const fp = path.join(base, n);
+          const { mtimeMs } = await fsp.stat(fp);
+          if (mtimeMs < cutoff) return;
+          add((await sessionFileCwd(fp)) || (await (guess = guess || cwdFromDirName(d))), mtimeMs, 'claude');
         } catch { /* */ }
       }));
-      if (!newest || newest.mtimeMs < cutoff) return;
-      try {
-        // ==== 二开: cockpit ==== cwd 从文件头抓不到（前 64KB 没 cwd 行）时，从目录名反解兜底，
-        // 避免 work 这种「最新 jsonl 头部全是 thinking/tool_use」的项目整条丢失
-        let cwd = await readCwdFromHead(newest.fp, 65536);
-        if (!cwd) cwd = await cwdFromDirName(d);
-        add(cwd, newest.mtimeMs, 'claude');
-      } catch { /* */ }
     }));
   } catch { /* 没用过 Claude Code */ }
-  // Codex：最近改动的 rollout 文件头部抓 cwd（数量封顶，控制 IO）
-  try {
-    const files = [];
-    const walk = async (dir, depth) => {
-      let names;
-      try { names = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
-      for (const n of names) {
-        const fp = path.join(dir, n.name);
-        if (n.isDirectory() && depth < 3) await walk(fp, depth + 1);
-        else if (n.isFile() && n.name.endsWith('.jsonl')) {
-          try { const st = await fsp.stat(fp); if (st.mtimeMs >= cutoff) files.push({ fp, mtimeMs: st.mtimeMs }); } catch { /* */ }
-        }
-      }
-    };
-    await walk(CODEX_SESS, 0);
-    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    await Promise.all(files.slice(0, 40).map(async (f) => {
-      try { add(await readCwdFromHead(f.fp, 16384), f.mtimeMs, 'codex'); } catch { /* */ }
-    }));
-  } catch { /* 没用过 Codex */ }
   // 按最近活跃排序，已被删除的项目目录剔掉
   const sorted = [...map.entries()].sort((a, b) => b[1].lastActive - a[1].lastActive);
   const projects = [];
   for (const [cwd, info] of sorted) {
-    if (projects.length >= 12) break;
+    if (projects.length >= 20) break;
     try { if (!(await fsp.stat(cwd)).isDirectory()) continue; } catch { continue; }
     projects.push({ path: cwd, name: path.basename(cwd), agents: [...info.agents], lastActive: info.lastActive });
   }
@@ -2092,11 +2081,17 @@ async function agentSessions() {
     try { entries = await fsp.readdir(dir); } catch { return; } // 纯 codex 项目没有 claude 目录，不进侧栏
     const files = [];
     await Promise.all(entries.filter((n) => n.endsWith('.jsonl')).map(async (n) => {
-      try { const fp = path.join(dir, n); files.push({ fp, st: await fsp.stat(fp) }); } catch { /* */ }
+      try {
+        const fp = path.join(dir, n);
+        // 同目录混着别的项目的会话（汉字名撞车）：cwd 明确不是本项目就不收；读不到 cwd 的保持旧行为
+        const cwd = await sessionFileCwd(fp);
+        if (cwd && cwd !== pj.path) return;
+        files.push({ fp, st: await fsp.stat(fp) });
+      } catch { /* */ }
     }));
     files.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
     const sessions = [];
-    for (const f of files.slice(0, 40)) {
+    for (const f of files.slice(0, 50)) {
       try {
         const s = await parseClaudeSession(f.fp, f.st);
         // 空会话（无人打过字、也没标题）多半是探测/崩溃残留，列出来只添乱
@@ -2319,7 +2314,7 @@ async function skillsData(opts = {}) {
       await scanSkillRoot(path.join(p.path, '.claude', 'skills'), 'project', p.name, items);
     }
   } catch { /* */ }
-  // 额外追加扫描当前浏览目录（不在最近12个项目里也能看到）
+  // 额外追加扫描当前浏览目录（不在最近20个项目里也能看到）
   for (const cwd of extraCwds) {
     if (!cwd || seenCwds.has(cwd)) continue;
     try {

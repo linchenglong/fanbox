@@ -85,11 +85,19 @@
 - **claude 输入框 ↑/↓ 边界移动**：首/末行但光标不在行首/行尾时，↑/↓ 先发 `\x01`/`\x05`（readline 行首/行尾）；已在边界才放行原生键翻历史。屏读判定：`❯` 行 + 续行两空格缩进 + 底边框。两个坑：**claude TUI 本身跑在 alternate screen**（不能按 `buf.type` 排除 vim/less，靠屏读特征区分）；**`❯` 后缀与续行缩进是 NBSP（\xa0）非普通空格**（`rowText` 统一归一化）。认不出的形态一律放行原生键，最差回退原生行为
 - **反向认领 `adoptByHost`**：手动敲 claudex / 重启还原的 tab 没有 `claudeSessionId` 标记，`adoptLiveSessions` 只认 `claudeProj` 轮不到它——发消息后侧栏名字换了 tab 标题不动。挂 15s 轮询：对「开着但没 tab 认领」的会话查 `/api/session-host`（FANBOX_TERM_ID 反查 tab id）自动补标记 + 刷标题。与第 8 节点击侧栏时的手动配对同一数据源，差别是不用等用户点击
 
+### 11. 侧栏项目修正（fix/agent-projects）
+
+- **只收 Claude 项目**：删掉 `agentProjects` 的 Codex 扫描。Codex 项目本来就不进侧栏（`agentSessions` 找不到 claude 目录就跳过），却先占 12 个名额——实测 12 个里 5 个纯 Codex 被丢，侧栏只剩 7 个
+- **项目身份 = 会话文件头的 cwd，不是目录名**：claude 的目录名把每个非字母数字字符（含每个汉字）压成 `-`，`BAA定位` 与 `BAA记忆` 同落 `...-Program-BAA--`。旧逻辑每目录只取最新会话的 cwd，后者整个项目消失、会话还混进前者名下。新增 `sessionFileCwd`（逐文件读头部 cwd，读到即按文件缓存，cwd 终身不变）；`agentProjects` 逐文件归属，`agentSessions` 只收 cwd 属于本项目的会话（cwd 读不到的保持旧行为）。175 个近 30 天会话文件冷读 75ms
+- **上限**：项目 12→20，每项目会话 40→50
+- 验证没起第二个 FanBox 实例（会再起一套定时任务调度器，有重复触发风险）：加载 `server.js` 时让 `listen`/写盘/定时器空转，只导出 `agentProjects`/`agentSessions` 跑真实数据
+
 ## 已知限制
 
 - xterm canvas 渲染与 CoreText 存在先天字形差异，字重 500 追回约九成观感
 - `npm run dist` 需先改掉 package.json 里原作者的签名配置（`identity`/`notarize`/`appId`）
 - Codex/kimi/opencode 的会话不进侧栏（只做 Claude）
+- `projectMemory`（项目记忆页，上游代码）仍按目录名读会话，汉字撞车的目录里会混入别的项目的会话——二开只修了侧栏
 
 ## 验证方式（历次实测手段）
 
