@@ -52,6 +52,11 @@ function sysProxyEnv() {
 async function build() {
   const shellEnv = await dumpShellEnv();
   const env = { ...process.env, ...shellEnv }; // process.env 打底，shell 导入的覆盖（PATH/代理/BASE_URL/key 等）
+  // TERM_PROGRAM 归属改写：FanBox 可能从 Terminal.app 启动（process.env 带 Apple_Terminal），无头 claude
+  // 继承后会以为宿主是 Apple Terminal，发通知前 osascript 查 Terminal 响铃设置——Terminal 没运行时
+  // 这条 Apple Event 会把它拉起 → 空终端随机弹出。这里跑的是无头进程，跟 GUI 终端无关，直接归 fanbox。
+  env.TERM_PROGRAM = 'fanbox';
+  delete env.TERM_PROGRAM_VERSION;
   if (!PROXY_KEYS.some((k) => env[k])) Object.assign(env, await sysProxyEnv()); // 仍无代理 → 系统代理兜底，不覆盖已有
   if (!/UTF-8/i.test(env.LC_ALL || env.LC_CTYPE || env.LANG || '')) env.LANG = 'en_US.UTF-8'; // claude/codex 含中文，保 UTF-8
   return env;

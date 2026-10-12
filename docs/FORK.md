@@ -92,6 +92,13 @@
 - **上限**：项目 12→20，每项目会话 40→50
 - 验证没起第二个 FanBox 实例（会再起一套定时任务调度器，有重复触发风险）：加载 `server.js` 时让 `listen`/写盘/定时器空转，只导出 `agentProjects`/`agentSessions` 跑真实数据
 
+### 12. TERM_PROGRAM 归属改写（fix/term-program）
+
+- **症状**：Terminal.app 随机弹出空终端窗口。**根因**：FanBox 从 Terminal.app 启动（`npm start`）时 `process.env` 带 `TERM_PROGRAM=Apple_Terminal`，子进程里的 claude 因此走「Apple Terminal 响铃通知」分支——每次发通知前跑 `osascript -e 'tell application "Terminal" to name of current settings of front window'`（claude 二进制内嵌的 JS 里可见），Terminal 没在运行时这条 Apple Event 会把它拉起
+- **改法**：两个子进程出口都把 `TERM_PROGRAM` 改写成 `fanbox`、删 `TERM_PROGRAM_VERSION`：`electron/main.js` 的 `pty:spawn`（终端 tab；定时任务也经此）、`electron/wechat/env.js` 的 `build()`（微信桥拉起的无头 claude/codex）。claude 识别不了宿主就不发响铃通知，与从 Dock 启动（`TERM_PROGRAM` 本就未设）一致
+- **验证**：真实 PTY 对照（模拟 Apple_Terminal 启动）——改前子进程 `TERM_PROGRAM=Apple_Terminal`/版本 `455`，改后 `fanbox`/空，login shell 的启动文件不会改回；`env.js` 的 `fullEnv()` 直接实测。**只对重启后新开的终端生效**，运行中的 tab 环境已定
+- **未实证**：「空终端不再弹」本身是随机现象，需长期观察
+
 ## 已知限制
 
 - xterm canvas 渲染与 CoreText 存在先天字形差异，字重 500 追回约九成观感
