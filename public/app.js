@@ -420,13 +420,36 @@ function favBtn(e) {
   const on = isFav(e.path);
   return `<span class="fav-btn ${on ? 'on' : ''}" title="收藏">${svgWrap(SVG.star, 'currentColor', 15, on)}</span>`;
 }
+// 本机图片的「显示用 URL」：唯一的出口，谁要在屏幕上画一张本地图都从这里拿。
+// 存储层（markdown 里的路径、state.entries[].path）永远是干净的绝对路径，只有渲染的
+// 这一刻才映射成 URL。这条边界一破，编辑器就会为了显示一个 600px 的框去解码 4032px 的
+// 原图（一张手机照片 = 48MB 位图），十张就能把渲染进程拖死。
+// mtime 给了就带上版本号，服务端按「内容不会再变」发长缓存；给不了（md 里引用的图，
+// 拿不到条目元数据）就不带，服务端改发协商缓存——改过的图下一眼就是新的，别让 7 天
+// 强缓存把刚打完马赛克的图锁成旧的
+function thumbUrl(abs, w, mtime) {
+  return `/api/thumb?path=${encodeURIComponent(abs)}&w=${Math.round(w)}${mtime ? `&v=${mtime}` : ''}`;
+}
+// 能安全走缩略图的扩展名。gif 不能——服务端 sips 会把它转成 png，动图当场变成第一帧；
+// svg 也不进——本来就是矢量、体积小，光栅化只会更糊更大
+const DISPLAY_THUMB_EXT = new Set(['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff', 'tif', 'heic', 'heif', 'avif']);
+function canThumb(p) {
+  const b = baseOf(String(p || ''));
+  return b.includes('.') && DISPLAY_THUMB_EXT.has((b.split('.').pop() || '').toLowerCase());
+}
+// 文档类图片的显示宽度：按预览区实宽 × 像素密度取图，跟着分栏拖动走。1600 是服务端上限
+function displayImgWidth() {
+  const host = $('#preview-body');
+  const css = (host && host.clientWidth) || 900;
+  return Math.min(1600, Math.max(480, Math.round(css * (window.devicePixelRatio || 1))));
+}
 function thumbHtml(e) {
   // 关键性能修复：用缩略图端点（sips/qlmanage 缓存小图），不再把原图/原视频整文件拉进来解码
   if (e.kind === 'image' || e.kind === 'video') {
     const w = state.gridSize === 'lg' ? 320 : (state.gridSize === 'sm' ? 160 : 240);
     const fb = e.kind === 'video' ? 'window.__svgVideo' : 'window.__svgImg';
     // 照片按原比例呈现（object-fit:contain）+ 柔和投影，像散落的照片；缩略图失败回退强色字形
-    const img = `<img class="thumb" loading="lazy" decoding="async" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=${w}&v=${e.mtime || 0}" alt="" onerror="this.closest('.thumb-wrap').replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:${fb}}))">`;
+    const img = `<img class="thumb" loading="lazy" decoding="async" src="${thumbUrl(e.path, w, e.mtime)}" alt="" onerror="this.closest('.thumb-wrap').replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:${fb}}))">`;
     const play = e.kind === 'video' ? '<span class="play-badge"><svg viewBox="0 0 24 24" width="40%" height="40%"><path d="M8 5.5l11 6.5-11 6.5z" fill="#fff"/></svg></span>' : '';
     return `<span class="thumb-wrap${e.kind === 'video' ? ' is-video' : ''}">${img}${play}</span>`;
   }
@@ -463,7 +486,7 @@ function listRow(e, i) {
   if (chgR) { el.dataset.changed = chgR.count > 1 ? '改·' + chgR.count : '改'; el.style.setProperty('--heat', Math.min(1, 0.4 + chgR.count * 0.12).toFixed(2)); if (chgR.files.size) el.title = '刚变更：\n' + [...chgR.files].join('\n'); }
   // 最近修改是跨目录列表，名称后缀显示来源目录，方便区分同名文件
   const dirHint = state.recentMode ? ` <span class="row-dir">· ${escapeHtml(tilde(e.dir || dirOf(e.path)))}</span>` : '';
-  el.innerHTML = `<div class="icon">${(e.kind === 'image' || e.kind === 'video') ? `<img class="thumb-sm" loading="lazy" decoding="async" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=96&v=${e.mtime || 0}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:this.dataset.fb||''}))" data-fb='${escapeHtml(iconSvg(e, 18))}'>` : `<span class="svg-icon">${iconSvg(e, 18)}</span>`}</div>
+  el.innerHTML = `<div class="icon">${(e.kind === 'image' || e.kind === 'video') ? `<img class="thumb-sm" loading="lazy" decoding="async" src="${thumbUrl(e.path, 96, e.mtime)}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:this.dataset.fb||''}))" data-fb='${escapeHtml(iconSvg(e, 18))}'>` : `<span class="svg-icon">${iconSvg(e, 18)}</span>`}</div>
     <div class="fname">${escapeHtml(e.name)}${projBadge(e)}${dirHint}</div>
     <div class="meta">${fmtTime(e.mtime)}</div>
     <div class="meta">${e.isDir ? '' : fmtSize(e.size)}</div>
@@ -592,6 +615,14 @@ async function openPreview(e) {
   if (!await guardDirty()) return;
   mona.disposeIfAny(); crepe.disposeIfAny(); imgEditState = null; // 离开编辑态时回收编辑器（连带 worker），避免泄漏
   showPreviewPanel();
+  state.selected = e.path;
+  // ==== 二开: cockpit ==== 右侧预览归属当前活跃终端 tab（切换 tab 触发的恢复除外）
+  if (cockpitOn() && !cockpitPreview._switching) {
+    const cur = term.sessions.find((x) => x.id === term.active);
+    if (cur) cur.cockpitFile = e;
+    cockpitPreview._shownPath = e.path;
+    term.persistTabs();
+  }
   $('#preview-title').textContent = e.name;
   const body = $('#preview-body');
   body.innerHTML = '<div class="cmdk-loading">加载中…</div>';
@@ -628,6 +659,9 @@ async function openPreview(e) {
         `<div class="arch-row${en.name.endsWith('/') ? ' is-dir' : ''}"><span class="arch-name">${escapeHtml(en.name)}</span><span class="arch-size">${en.size != null ? fmtSize(en.size) : ''}</span></div>`).join('');
       body.innerHTML = `<div class="preview-meta"><span>${fmtSize(e.size)}</span><span>${d.entries.length}${d.truncated ? '+' : ''} 项</span></div><div class="arch-list">${rows}</div>`;
     }
+  } else if (k === 'office') {
+    // ==== 二开: office —— Office 三件套原地预览 ====
+    await renderOfficePreview(e);
   } else {
     body.innerHTML = `<div class="empty-state"><div class="big">${iconSvg(e, 48)}</div>这个文件类型无法预览<br><br>${fmtSize(e.size)}</div>`;
   }
@@ -660,12 +694,14 @@ function mdReadBody(md, srcPath) {
   const div = document.createElement('div');
   div.className = 'md-body';
   div.innerHTML = window.marked ? window.marked.parse(md || '') : escapeHtml(md || '');
-  fixLocalImages(div, srcPath);
+  fixLocalImages(div, srcPath, displayImgWidth()); // 三个调用点都是「给人看」，一律走缩略图；导出走 typeset 那条，不经这里
   if (window.hljs && !window.__noHljs) div.querySelectorAll('pre code').forEach((b) => { try { window.hljs.highlightElement(b); } catch { /* */ } });
   return div;
 }
-// 把 md 里指向本机文件的图片换成 /api/raw；外链 http(s)/data/blob 不动
-function fixLocalImages(root, srcPath) {
+// 把 md 里指向本机文件的图片接到本机端点；外链 http(s)/data/blob 不动。
+// dispW 给了就按那个宽度走缩略图（屏幕上看的场合：阅读态、跟随、编辑器兜底）；
+// 不给就出原图（排版导出、复制到公众号——那些是要发出去的成品，不能拿缩略图糊弄）。
+function fixLocalImages(root, srcPath, dispW) {
   if (!srcPath) return;
   const base = dirOf(srcPath);
   root.querySelectorAll('img').forEach((im) => {
@@ -674,7 +710,7 @@ function fixLocalImages(root, srcPath) {
     let rel = raw.split('#')[0].split('?')[0];
     try { rel = decodeURIComponent(rel); } catch { /* 本来就没编码 */ }
     const abs = rel.startsWith('/') ? rel : normPath(base + '/' + rel);
-    im.setAttribute('src', '/api/raw?path=' + encodeURIComponent(abs));
+    im.setAttribute('src', dispW && canThumb(abs) ? thumbUrl(abs, dispW) : '/api/raw?path=' + encodeURIComponent(abs));
   });
 }
 // 折掉路径里的 ./ 和 ../，让相对图片路径能拼成真实绝对路径
@@ -816,6 +852,13 @@ async function closePreview() {
   $('#preview').classList.add('hidden');
   $('#preview-resizer').classList.add('hidden');
   applySelection(null);
+  // ==== 二开: cockpit ==== 关闭右侧预览只解绑当前活跃 tab，不影响其它 tab 已打开的文件
+  if (cockpitOn()) {
+    const cur = term.sessions.find((x) => x.id === term.active);
+    if (cur) cur.cockpitFile = null;
+    cockpitPreview._shownPath = '';
+    term.persistTabs();
+  }
   term.fitActive();
 }
 function lightbox(path, nativeImg, mtime) {
@@ -839,7 +882,8 @@ function applyLayout() {
 // WOW3：把选中的文字做成一个残影「甩」进终端，落地时终端闪一下——交互本身就是惊喜
 function flingToTerminal(text, fromRect) {
   const panel = $('#terminal-panel');
-  const tRect = (panel && !panel.classList.contains('hidden')) ? panel.getBoundingClientRect() : null;
+  const hostEl = (cockpitOn() && $('#xterm-host')) || panel; // ==== 二开: cockpit ==== 残影飞入左侧终端而非整块面板
+  const tRect = (panel && !panel.classList.contains('hidden')) ? hostEl.getBoundingClientRect() : null;
   const ghost = document.createElement('div');
   ghost.className = 'fling-ghost';
   ghost.textContent = text.length > 42 ? text.slice(0, 42) + '…' : text;
@@ -923,6 +967,16 @@ function bindSidebarResizer() {
 function applyPreviewSize() {
   const pv = $('#preview');
   if (!pv || pv.classList.contains('hidden')) return;
+  // ==== 二开: cockpit ==== 驾驶舱下预览在 #term-body 内居终端右侧，按 #term-body 横向算分栏宽度
+  if (cockpitOn()) {
+    const tb = document.getElementById('term-body') || $('#terminal-panel');
+    const r = tb && tb.getBoundingClientRect();
+    const saved = Number(localStorage.getItem('fb_cockpit_pvw')) || 0;
+    let w = saved || (r && r.width ? Math.round(r.width * 0.46) : 520);
+    if (r && r.width > 520) w = Math.min(r.width - 240, Math.max(260, w));
+    pv.style.flexBasis = w + 'px';
+    return;
+  }
   const isRight = term.dock === 'right';
   let basis = isRight ? state.previewH : state.previewW; // 0 = 还没手动拖过
   if (!basis) { // 首次：文件列表:预览 = 1:2，预览占 2/3
@@ -1334,12 +1388,14 @@ async function enterEditMode(e) {
     ed.addCommand(monaco.KeyMod.CmdCtrl | monaco.KeyCode.KeyS, () => flush()); // ⌘S 立即保存
     undoBtn.onclick = () => { ed.focus(); ed.trigger('bar', 'undo'); };
     redoBtn.onclick = () => { ed.focus(); ed.trigger('bar', 'redo'); };
-    setTimeout(() => ed.focus(), 0);
+    // ==== 二开: cockpit ==== 驾驶舱内打开/切回预览不偷抢左侧终端焦点；带行号链接自动跳到对应行
+    if (e._lineJump > 0) { ed.revealLineInCenter(e._lineJump); ed.setPosition({ lineNumber: e._lineJump, column: 1 }); }
+    if (!cockpitOn()) setTimeout(() => ed.focus(), 0);
   } else {
     body.innerHTML = editorBar + `<textarea id="ed-host" class="editor-area" spellcheck="false"></textarea>`;
     const ta = $('#ed-host');
     ta.value = data.content || '';
-    ta.focus();
+    if (!cockpitOn()) ta.focus();
     getValue = () => ta.value;
     const undoBtn = $('#ed-undo'), redoBtn = $('#ed-redo');
     // 兜底编辑器查不到撤销栈，改过即放开两个键（execCommand 自己会判断有没有可撤销/重做的）
@@ -1781,18 +1837,46 @@ async function snapshotPanel(dirPath) {
   const close = () => { ov.remove(); document.removeEventListener('keydown', onKey, true); };
   ov.onclick = (ev) => { if (ev.target === ov) close(); };
   document.addEventListener('keydown', onKey, true);
-  const d = await api('/api/snapshots?path=' + encodeURIComponent(dirPath));
+  const [d, u] = await Promise.all([api('/api/snapshots?path=' + encodeURIComponent(dirPath)), api('/api/snapshots/usage').catch(() => null)]);
   const body = ov.querySelector('.snap-body');
+  const projName = d.project ? baseOf(d.project) : '';
+  // agent 正在这个项目里干活时不给回滚/清理：一边写一边动它的仓库只会两败俱伤
+  const busyHere = () => {
+    let busy = false;
+    term.sessions.forEach((t) => {
+      const c = t.cwd || t.startDir || '';
+      if (!t.dead && t.status === 'busy' && (c === d.project || c.startsWith(d.project + '/') || d.project.startsWith(c + '/'))) busy = true;
+    });
+    return busy;
+  };
+  // 占用一栏：影子仓库堆在 ~/.fanbox 里从前界面上完全看不见（实测 22GB），这里给个数字和两个清理口
+  const mine = u && u.ok && d.project ? u.repos.find((r) => r.project === d.project) : null;
+  const usageHtml = !u || !u.ok ? '' : `<div class="snap-usage"><span>存档共占用 ${fmtSize(u.total) || '0 B'}${d.project ? ` · 此项目 ${fmtSize(mine ? mine.bytes : 0) || '0 B'}` : ''}</span>` +
+    (mine ? '<button class="ghost-btn snap-restore" data-clean="project">清理此项目存档</button>' : '') +
+    '<button class="ghost-btn snap-restore" data-clean="dead">清理失效仓库</button></div>';
+  const wireClean = () => body.querySelectorAll('[data-clean]').forEach((b) => {
+    b.onclick = async () => {
+      const dead = b.dataset.clean === 'dead';
+      if (!dead && busyHere()) { toast('这个项目的 agent 正在干活，先等它停下（或按 Esc 打断）再清理', true); return; }
+      const msg = dead ? '删除所有没有任何可恢复快照的失效仓库？' : `删除「${projName}」的全部回合存档？删掉后无法再回到之前的任何一轮`;
+      if (!await confirmDialog(msg)) return;
+      b.disabled = true;
+      const r = await apiPost('/api/snapshots/clean', dead ? { dead: true } : { project: d.project });
+      if (!r.ok) { toast(r.error || '清理失败', true); b.disabled = false; return; }
+      toast(r.removed ? `已清理 ${r.removed} 个仓库，释放 ${fmtSize(r.freed) || '0 B'}` : '没有失效仓库');
+      snapshotPanel(dirPath); // 重开一遍，数字和列表都刷新
+    };
+  });
   if (!d.project || !d.snaps.length) {
-    body.innerHTML = '<div class="empty-state">这个文件夹还没有存档<br><br><span class="usage-sub">在内嵌终端里跑 agent 时，每轮开工前会自动存一份，坏了随时能回来</span></div>';
+    body.innerHTML = usageHtml + '<div class="empty-state">这个文件夹还没有存档<br><br><span class="usage-sub">在内嵌终端里跑 agent 时，每轮开工前会自动存一份，坏了随时能回来</span></div>';
+    wireClean();
     return;
   }
   const clock = (ts) => {
     const t = new Date(ts); const hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
     return t.toDateString() === new Date().toDateString() ? hm : `${t.getMonth() + 1}/${t.getDate()} ${hm}`;
   };
-  const projName = baseOf(d.project);
-  body.innerHTML = `<div class="snap-hint">每一条都是当时整个项目的完整状态。恢复前会自动把当前状态也存一份，随时能再滚回来。</div>` +
+  body.innerHTML = usageHtml + `<div class="snap-hint">每一条都是当时整个项目的完整状态。恢复前会自动把当前状态也存一份，随时能再滚回来。</div>` +
     d.snaps.map((s, i) => `
     <div class="snap-row">
       <span class="snap-time" title="${new Date(s.ts).toLocaleString()}">${clock(s.ts)}</span>
@@ -1800,16 +1884,11 @@ async function snapshotPanel(dirPath) {
       <span class="snap-ago">${fmtTime(s.ts)}</span>
       <button class="ghost-btn snap-restore" data-i="${i}">回到这时</button>
     </div>`).join('');
-  body.querySelectorAll('.snap-restore').forEach((b) => {
+  wireClean();
+  body.querySelectorAll('.snap-restore[data-i]').forEach((b) => {
     b.onclick = async () => {
       const s = d.snaps[Number(b.dataset.i)];
-      // agent 正在这个项目里干活时不给回滚：一边写一边恢复只会两败俱伤
-      let busy = false;
-      term.sessions.forEach((t) => {
-        const c = t.cwd || t.startDir || '';
-        if (!t.dead && t.status === 'busy' && (c === d.project || c.startsWith(d.project + '/') || d.project.startsWith(c + '/'))) busy = true;
-      });
-      if (busy) { toast('这个项目的 agent 正在干活，先等它停下（或按 Esc 打断）再恢复', true); return; }
+      if (busyHere()) { toast('这个项目的 agent 正在干活，先等它停下（或按 Esc 打断）再恢复', true); return; }
       if (!await confirmDialog(`把「${projName}」整个恢复到 ${clock(s.ts)} 存档时的样子？之后的改动会被移除（当前状态已自动存档，可再滚回来）`)) return;
       b.disabled = true; b.textContent = '恢复中…';
       const r = await apiPost('/api/snapshot-restore', { path: d.project, hash: s.hash });
@@ -2040,12 +2119,20 @@ function agoShort(ms) {
   if (m < 1440) return Math.round(m / 60) + ' 时';
   return Math.round(m / 1440) + ' 天';
 }
-// ==== 二开: cockpit —— Agent 项目 → Claude session 列表 ====
-// 侧栏不再展示项目子文件夹，改为展示每个项目的 Claude 会话（按最后活跃降序）。
-// 点击 session：已开 tab → 切过去；没开 → 在项目目录新开 tab 自动续上（命令模板存 config.json）。
+// ==== 二开: cockpit —— Agent 项目 → Claude Code + Antigravity session 列表 ====
+// 侧栏在同一项目目录树下混排 Claude Code 与 Antigravity 会话（按最后活跃降序），靠官方小图标区分引擎。
+// 点击 session：已开 tab → 切过去；没开 → 按会话所属引擎在项目目录新开 tab 自动续接（命令模板存 config.json）。
+const SESS_AGENTS = {
+  claude: { label: 'Claude Code', short: 'Claude', icon: '/assets/agents/claude.svg' },
+  agy: { label: 'Antigravity', short: 'Antigravity', icon: '/assets/agents/agy.svg' },
+};
+const sessAgentMeta = (agent) => SESS_AGENTS[agent] || SESS_AGENTS.claude;
+
 const sessUI = {
   resumeCmd: 'claudex -r {id}',
   newCmd: 'claudex',
+  agyResumeCmd: 'agy --conversation {id}',
+  agyNewCmd: 'agy',
   projects: [],
   showAll: new Set(),    // 点过「还有 N 个」的项目
   collapsed: new Set(),  // 收起了整个会话列表的项目
@@ -2056,19 +2143,32 @@ const sessUI = {
 };
 // session 的展示名：自定义名 > 首条消息摘要 > 兜底
 const sessDisplayName = (s) => s.name || s.title || '（无标题会话）';
-// 挂了 claude 会话的 tab，标题跟随会话名（截短防挤爆 tab 栏）；改名/收养/自动命名后调用
+// 统一构建续接命令（侧栏点击续接 + 重启自动恢复共用同一出口）：
+// 若会话记录了上次使用的模型且模板未硬编码 --model，则单引号安全包裹追加 --model（防 zsh 将 [1m] 或括号当通配符/语法报错）
+function buildSessionResumeCmd(agent, sid, model) {
+  const tpl = agent === 'agy' ? sessUI.agyResumeCmd : sessUI.resumeCmd;
+  let cmd = tpl.replace('{id}', sid);
+  if (model && !/(?:^|\s)--model(?:\s|=)/.test(cmd)) {
+    cmd += ` --model '${String(model).replace(/'/g, `'\\''`)}'`;
+  }
+  return cmd;
+}
+// 挂了 agent 会话的 tab，标题、引擎标识与最后使用的模型跟随会话（截短防挤爆 tab 栏）；改名/收养/自动命名/切模型后调用
 function syncSessTabTitles() {
   const byId = new Map();
   sessUI.projects.forEach((p) => p.sessions.forEach((s) => byId.set(s.id, s)));
-  let changed = false;
+  let changed = false, metaUpdated = false;
   term.sessions.forEach((t) => {
     if (t.dead || !t.claudeSessionId) return;
     const s = byId.get(t.claudeSessionId);
     if (!s) return;
+    if (s.agent && t.sessionAgent !== s.agent) { t.sessionAgent = s.agent; changed = true; }
+    if (s.model && t.sessionModel !== s.model) { t.sessionModel = s.model; metaUpdated = true; }
     const want = sessDisplayName(s).slice(0, 14);
     if (t.title !== want) { t.title = want; changed = true; }
   });
   if (changed) term.renderTabs();
+  else if (metaUpdated) term.persistTabs();
 }
 
 function sessionOpenIds() {
@@ -2095,6 +2195,8 @@ async function loadAgentProjects() {
   if (!data.ok) return;
   sessUI.resumeCmd = data.resumeCmd || sessUI.resumeCmd;
   sessUI.newCmd = data.newCmd || sessUI.newCmd;
+  sessUI.agyResumeCmd = data.agyResumeCmd || sessUI.agyResumeCmd;
+  sessUI.agyNewCmd = data.agyNewCmd || sessUI.agyNewCmd;
   sessUI.projects = data.projects || [];
   // 置顶的排到各自项目最前（组内仍按 lastT 降序——服务端已排好，stable sort 保序）
   sessUI.projects.forEach((p) => p.sessions.sort((a, b) => (sessUI.pinned.has(b.id) ? 1 : 0) - (sessUI.pinned.has(a.id) ? 1 : 0)));
@@ -2115,7 +2217,7 @@ async function loadAgentProjects() {
 function renderSessionNav() {
   const ul = $('#agent-projects-list');
   ul.innerHTML = '';
-  if (!sessUI.projects.length) { ul.innerHTML = '<div class="nav-empty">用 Claude Code 跑过的项目会出现在这里</div>'; return; }
+  if (!sessUI.projects.length) { ul.innerHTML = '<div class="nav-empty">用 Claude Code 或 Antigravity 跑过的项目会出现在这里</div>'; return; }
   sessUI.projects.forEach((pj) => {
     const li = document.createElement('li');
     li.className = 'proj-li';
@@ -2145,8 +2247,14 @@ function renderSessionNav() {
     const add = document.createElement('span');
     add.className = 'proj-add';
     add.textContent = '＋';
-    add.title = `在 ${pj.name} 开一个全新的 Claude 会话`;
-    add.onclick = (ev) => { ev.stopPropagation(); launchNewSession(pj.path); };
+    add.title = `在 ${pj.name} 新建会话（Claude Code / Antigravity）`;
+    add.onclick = (ev) => {
+      ev.stopPropagation();
+      popupMenu(ev, [
+        { label: '新建 Claude Code 会话', fn: () => launchNewSession(pj.path, 'claude') },
+        { label: '新建 Antigravity 会话', fn: () => launchNewSession(pj.path, 'agy') },
+      ]);
+    };
     li.append(twirl, ico, label, when, add);
     li.onclick = () => navigate(pj.path); // 选中项目：⌘K / ＋ 终端 都落在这个目录
     makeDraggablePath(li, pj.path);
@@ -2173,7 +2281,7 @@ function renderSessionNav() {
 }
 
 // 四态圆点：进行中(蓝/呼吸) · 等待确认(橙) · 后台运行(紫) · 执行完成(绿)。
-// 状态由服务端读 jsonl 判定，与终端无关——在 iTerm 里跑的会话照样显示状态
+// 状态由服务端读会话数据判定，与终端宿主无关——在 iTerm/Terminal 里跑的会话照样显示状态
 const SESS_STATUS = {
   running: { label: '进行中', cls: 'st-running' },
   waiting: { label: '等待确认', cls: 'st-waiting' },
@@ -2181,20 +2289,28 @@ const SESS_STATUS = {
   done: { label: '执行完成', cls: 'st-done' },
 };
 function sessLi(pj, s) {
+  const agent = s.agent || 'claude';
+  const ag = sessAgentMeta(agent);
   const li = document.createElement('li');
   li.className = 'sess-li sess-closed';
   li.dataset.sid = s.id;
+  li.dataset.agent = agent;
   li.dataset.open = s.open ? '1' : '0';
   // 状态只属于打开着的会话；闭合会话就是一枚中性灰点
   const stInfo = s.open && SESS_STATUS[s.status] ? SESS_STATUS[s.status] : null;
   const dot = document.createElement('span');
   dot.className = 'sess-dot' + (stInfo ? ' ' + stInfo.cls : ' st-off');
   dot.title = stInfo ? stInfo.label : '未打开';
+  const agIcon = document.createElement('img');
+  agIcon.className = 'sess-agent-ic';
+  agIcon.src = ag.icon;
+  agIcon.alt = ag.short;
+  agIcon.draggable = false;
   const label = document.createElement('span');
   label.className = 'label';
   label.textContent = sessDisplayName(s);
   const pinned = sessUI.pinned.has(s.id);
-  li.title = `${stInfo ? stInfo.label + ' · ' : ''}${s.title || '（无标题会话）'}\n${fmtTime(s.lastT)}${s.userMsgs ? ` · ${s.userMsgs} 条消息` : ''}\n单击：打开 / 切换到这个会话`;
+  li.title = `[${ag.label}${s.model ? ' · ' + s.model : ''}] ${stInfo ? stInfo.label + ' · ' : ''}${s.title || '（无标题会话）'}\n${fmtTime(s.lastT)}${s.userMsgs ? ` · ${s.userMsgs} 条消息` : ''}\n单击：打开 / 切换到这个 ${ag.short} 会话`;
   const more = document.createElement('span');
   more.className = 'sess-edit';
   more.textContent = '⋯';
@@ -2211,11 +2327,11 @@ function sessLi(pj, s) {
     pin.className = 'sess-pin';
     pin.textContent = '📌';
     pin.title = '已置顶';
-    li.append(dot, label, pin, more);
+    li.append(dot, agIcon, label, pin, more);
   } else {
-    li.append(dot, label, more);
+    li.append(dot, agIcon, label, more);
   }
-  li.onclick = () => openSession(pj.path, s.id);
+  li.onclick = () => openSession(pj.path, s.id, agent, s.model || '');
   return li;
 }
 
@@ -2229,10 +2345,15 @@ function togglePinSession(sessId) {
   refreshSessionOpenState();
 }
 
-// 点击 session：已有活 tab → 切换；否则在项目目录开 tab、自动跑续接命令。
+// 点击 session：已有活 tab → 切换；否则在项目目录开 tab、按会话所属引擎（claude / agy）自动跑续接命令。
 // 不真的敲 `cd`——pty spawn 时 cwd 就是项目目录，效果等价且不脏 shell 历史。
-async function openSession(projPath, sessId) {
+async function openSession(projPath, sessId, agent = 'claude', model = '') {
   if (!term.available()) { toast('内嵌终端不可用（网页版）——请用桌面 App 打开会话', true); return; }
+  // 若调用处未传 model，兜底从 sessUI 最新缓存里按 id 查找
+  if (!model) {
+    const hit = sessUI.projects.flatMap((p) => p.sessions).find((x) => x.id === sessId);
+    if (hit && hit.model) model = hit.model;
+  }
   // ① 前端自己标记过的 tab（点侧栏开出来的）
   const live = term.sessions.find((s) => !s.dead && s.claudeSessionId === sessId);
   if (live) {
@@ -2241,50 +2362,59 @@ async function openSession(projPath, sessId) {
     live.xterm.focus();
     return;
   }
-  // ② 前端没标记但会话确实开着（手动在 FanBox 终端敲 claudex 起的 / 外部宿主跑的）：
+  // ② 前端没标记但会话确实开着（手动在 FanBox 终端敲 claudex/agy 起的 / 外部宿主跑的）：
   //    问服务端它跑在哪——FANBOX_TERM_ID 配对到本地 tab 就切过去并补标记；外部宿主则提示，
-  //    绝不再开一个 tab 双开（claude -r 双开会写坏 jsonl，见 warp自定义/BLOCKED.md）
+  //    绝不再开一个 tab 双开（claude -r 双开写坏 jsonl，agy 双开抢 presence 锁）
   try {
-    const h = await api('/api/session-host?id=' + encodeURIComponent(sessId));
+    const h = await api('/api/session-host?id=' + encodeURIComponent(sessId) + '&agent=' + encodeURIComponent(agent));
     if (h && h.open) {
       if (h.termId) {
         const s = term.sessions.find((x) => !x.dead && x.id === h.termId);
         if (s) {
           s.claudeSessionId = sessId; // 补标记，下次点击走 ① 不再询问
+          s.sessionAgent = agent;
+          if (model) s.sessionModel = model;
           s.claudeProj = projPath;
           if ($('#terminal-panel').classList.contains('hidden')) term.open();
           term.activate(s.id);
           s.xterm.focus();
           syncSessTabTitles(); // tab 标题换成会话名
+          term.renderTabs(); // 同步 tab 引擎图标与状态圆点
           refreshSessionOpenState();
           return;
         }
       }
-      toast('这个会话正在别的终端（iTerm/Warp 等）里运行——别双开，会写坏会话记录', true);
+      toast(`这个 ${sessAgentMeta(agent).short} 会话正在别的终端（iTerm/Warp/Terminal 等）里运行——别双开，会冲突或写坏会话记录`, true);
       return;
     }
   } catch { /* 服务端查不到就按未打开走，最多是旧行为 */ }
   const sess = await term.openInDir(projPath);
   if (!sess || sess.dead) return;
   sess.claudeSessionId = sessId;
+  sess.sessionAgent = agent;
+  sess.sessionModel = model || '';
   sess.claudeProj = projPath;
   sess.sessSpawnT = Date.now();
-  term.input(sess.id, sessUI.resumeCmd.replace('{id}', sessId) + '\r');
+  term.input(sess.id, buildSessionResumeCmd(agent, sessId, model) + '\r');
   sess.xterm.focus();
   syncSessTabTitles(); // tab 标题立即换成会话名
+  term.renderTabs(); // 立即更新 tab 引擎图标与持久化快照
   refreshSessionOpenState();
   scheduleSessRefresh();
 }
 
-async function launchNewSession(projPath) {
+async function launchNewSession(projPath, agent = 'claude') {
   if (!term.available()) { toast('内嵌终端不可用（网页版）——请用桌面 App 开新会话', true); return; }
   const sess = await term.openInDir(projPath);
   if (!sess || sess.dead) return;
-  sess.claudeSessionId = null; // 等新 session 的 jsonl 出现后由 adoptLiveSessions 认领
+  sess.claudeSessionId = null; // 等新 session 落盘后由 adoptLiveSessions / adoptByHost 认领
+  sess.sessionAgent = agent;
   sess.claudeProj = projPath;
   sess.sessSpawnT = Date.now();
-  term.input(sess.id, sessUI.newCmd + '\r');
+  const cmd = agent === 'agy' ? sessUI.agyNewCmd : sessUI.newCmd;
+  term.input(sess.id, cmd + '\r');
   sess.xterm.focus();
+  term.renderTabs();
   scheduleSessRefresh();
 }
 
@@ -2303,7 +2433,7 @@ async function renameSession(pj, s) {
 }
 
 // resume 在部分版本会把续写落到「新 session id」的 jsonl（fork）；「＋ 新会话」的 tab 一开始也没有 id。
-// 认领规则：这个 tab 启动之后仍在更新、且没被其它 tab 认领的最新 session。
+// 认领规则：这个 tab 启动之后仍在更新、同引擎、且没被其它 tab 认领的最新 session。
 // 有旧标签时还要求旧 id 已断更（lastT 停在 tab 启动附近）——正常续写同一个 id 时绝不换标签。
 function adoptLiveSessions() {
   const byProj = new Map(sessUI.projects.map((p) => [p.path, p.sessions]));
@@ -2313,19 +2443,22 @@ function adoptLiveSessions() {
     const list = byProj.get(t.claudeProj);
     if (!list) return;
     const cur = t.claudeSessionId ? list.find((x) => x.id === t.claudeSessionId) : null;
-    const cand = list.find((x) => x.id !== t.claudeSessionId && !claimed.has(x.id) && x.lastT > (t.sessSpawnT || 0));
+    const cand = list.find((x) => x.id !== t.claudeSessionId && (!t.sessionAgent || x.agent === t.sessionAgent) && !claimed.has(x.id) && x.lastT > (t.sessSpawnT || 0));
     if (!cand) return;
     if (!cur || (cand.lastT > cur.lastT && cur.lastT < (t.sessSpawnT || 0) + 15000)) {
       t.claudeSessionId = cand.id;
+      t.sessionAgent = cand.agent || t.sessionAgent || 'claude';
+      if (cand.model) t.sessionModel = cand.model;
       claimed.add(cand.id);
+      term.persistTabs();
     }
   });
   syncSessTabTitles(); // 收养后 tab 标题跟上会话名
 }
 
-// ==== 二开: cockpit ==== 反向认领：手动敲 claudex / 重启还原的 tab 没有 claudeSessionId 标记，
+// ==== 二开: cockpit ==== 反向认领：手动敲 claudex / agy 或重启还原的 tab 没有 claudeSessionId 标记，
 // adoptLiveSessions 只认 claudeProj 轮不到它——侧栏名字换了 tab 标题却不动，点一下侧栏才补上。
-// 用注册表反查（/api/session-host 读 FANBOX_TERM_ID → tab id）自动补标记，不用等用户点击。
+// 用注册表/锁反查（/api/session-host 读 FANBOX_TERM_ID → tab id）自动补标记，不用等用户点击。
 async function adoptByHost() {
   if (adoptByHost._busy) return; // 15s 轮询防重入
   adoptByHost._busy = true;
@@ -2337,34 +2470,36 @@ async function adoptByHost() {
       for (const s of p.sessions) {
         if (!s.open || claimed.has(s.id)) continue; // 只查「开着但没 tab 认」的会话，通常 0-1 个
         try {
-          const h = await api('/api/session-host?id=' + encodeURIComponent(s.id));
+          const h = await api('/api/session-host?id=' + encodeURIComponent(s.id) + '&agent=' + encodeURIComponent(s.agent || ''));
           if (!h || !h.open || !h.termId) continue; // termId=null → 跑在 iTerm/Warp 等外部宿主
           const t = term.sessions.find((x) => !x.dead && !x.claudeSessionId && x.id === h.termId);
           if (!t) continue;
           t.claudeSessionId = s.id;
+          t.sessionAgent = s.agent || 'claude';
+          if (s.model) t.sessionModel = s.model;
           t.claudeProj = p.path;
           claimed.add(s.id);
           adopted = true;
         } catch { /* 单个查询失败下轮再试 */ }
       }
     }
-    if (adopted) { syncSessTabTitles(); refreshSessionOpenState(); }
+    if (adopted) { syncSessTabTitles(); term.renderTabs(); refreshSessionOpenState(); }
   } finally { adoptByHost._busy = false; }
 }
 
-// claude 退出 → 摘标签，session 变灰，标题回落目录名。
+// agent 退出 → 摘标签，session 变灰，标题与图标回落目录名。
 // 不用 isPlainShell（node-pty 的 proc 读前台进程组长名——claudex 包装脚本不 exec 时组长是 zsh，
-// claude 活着也返回 'zsh'，会把标签全误摘、标题闪回目录名）。改用注册表反查：
-// /api/session-host 走 ~/.claude/sessions/<PID>.json + ps 探活，claude 死了注册表进程就没了，权威。
+// claude 活着也返回 'zsh'，会把标签全误摘、标题闪回目录名）。改用注册表/presence 锁反查：
+// /api/session-host 对 claude 走 sessions 注册表+ps、对 agy 走 presence 锁+lsof，进程死了就没了，权威。
 async function checkSessionTabsAlive() {
   let changed = false;
   for (const t of term.sessions) {
     if (t.dead || !t.claudeSessionId) continue;
-    if (Date.now() - (t.sessSpawnT || 0) < 15000) continue; // 刚开的 tab 给 15s 宽限（claudex 可能还没起来）
+    if (Date.now() - (t.sessSpawnT || 0) < 15000) continue; // 刚开的 tab 给 15s 宽限（agent 可能还没起来）
     try {
-      const h = await api('/api/session-host?id=' + encodeURIComponent(t.claudeSessionId));
+      const h = await api('/api/session-host?id=' + encodeURIComponent(t.claudeSessionId) + '&agent=' + encodeURIComponent(t.sessionAgent || ''));
       if (h && h.ok && !h.open) {
-        t.claudeSessionId = null; t.claudeProj = null; changed = true;
+        t.claudeSessionId = null; t.sessionAgent = null; t.sessionModel = null; t.claudeProj = null; changed = true;
         t.title = baseOf(t.cwd || t.startDir || '') || 'shell';
       }
     } catch { /* 服务端没起来就当没变化 */ }
@@ -2520,9 +2655,20 @@ function maybeShowGuide() {
 function bindResizer() {
   const handle = $('#preview-resizer');
   let dragging = false;
-  handle.addEventListener('mousedown', (e) => { dragging = true; e.preventDefault(); handle.classList.add('dragging'); document.body.style.userSelect = 'none'; });
+  handle.addEventListener('mousedown', (e) => {
+    dragging = true; e.preventDefault(); handle.classList.add('dragging'); document.body.style.userSelect = 'none';
+    if (cockpitOn()) document.body.style.cursor = 'col-resize';
+  });
   window.addEventListener('mousemove', (e) => {
     if (!dragging) return;
+    // ==== 二开: cockpit ==== 驾驶舱下预览在 #term-body 右侧，横向拖拽调宽
+    if (cockpitOn()) {
+      const tb = (document.getElementById('term-body') || $('#terminal-panel')).getBoundingClientRect();
+      const w = Math.round(Math.min(tb.width - 240, Math.max(260, tb.right - e.clientX)));
+      localStorage.setItem('fb_cockpit_pvw', String(w));
+      applyPreviewSize();
+      return;
+    }
     const fm = $('#filemgmt').getBoundingClientRect();
     if (term.dock === 'right') { // 预览在文件区下方 → 纵向拖
       state.previewH = Math.round(Math.min(fm.height - 120, Math.max(140, fm.bottom - e.clientY)));
@@ -2533,9 +2679,11 @@ function bindResizer() {
   });
   window.addEventListener('mouseup', () => {
     if (!dragging) return;
-    dragging = false; handle.classList.remove('dragging'); document.body.style.userSelect = '';
-    localStorage.setItem('fb_preview_w', state.previewW);
-    localStorage.setItem('fb_preview_h', state.previewH || 340);
+    dragging = false; handle.classList.remove('dragging'); document.body.style.userSelect = ''; document.body.style.cursor = '';
+    if (!cockpitOn()) {
+      localStorage.setItem('fb_preview_w', state.previewW);
+      localStorage.setItem('fb_preview_h', state.previewH || 340);
+    }
   });
 }
 
@@ -2856,6 +3004,8 @@ const wechatView = {
 //           没有 sessions 字段 = 该 agent 暂不支持会话回溯（服务端也没有对应适配器）
 const AGENT_REGISTRY = [
   { id: 'claude', label: 'Claude Code', cmd: 'claude --dangerously-skip-permissions', bin: 'claude', install: 'npm install -g @anthropic-ai/claude-code', sessions: { badge: 'C', resumeCmd: 'claude --dangerously-skip-permissions --resume {id}' } },
+  // ==== 二开: cockpit —— 内置 Google Antigravity (agy) 启动与续接注册 ====
+  { id: 'agy', label: 'Antigravity', cmd: 'agy', bin: 'agy', install: 'https://antigravity.google/cli', sessions: { badge: 'A', resumeCmd: 'agy --conversation {id}' } },
   { id: 'codex', label: 'Codex', cmd: 'codex', bin: 'codex', install: 'npm install -g @openai/codex', sessions: { badge: '>_', resumeCmd: 'codex resume {id}' } },
   { id: 'hermes', label: 'Hermes Agent', cmd: 'hermes', bin: 'hermes', install: 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash' },
   { id: 'openclaw', label: 'OpenClaw', cmd: 'openclaw', bin: 'openclaw', install: 'npm install -g openclaw' },
@@ -2969,6 +3119,10 @@ const agentsPop = {
         <span class="ap-name">fanbox-agent skill</span>
         <span class="ap-flag" data-skill-flag="fanbox-agent"></span>
       </div>
+      <div class="ap-row" data-snap-entry title="查看与清理 ~/.fanbox/snapshots 回合存档磁盘占用，或将当前项目回滚到之前某轮">
+        <span class="ap-name">回合存档与空间清理</span>
+        <span class="ap-flag" style="cursor:pointer">打开</span>
+      </div>
       <div class="ap-foot">勾选即生效 · 点「未装」复制安装命令<br>高级：~/.fanbox/config.json 的 agents 数组可自定义命令 / 加新 agent</div>`;
     document.body.appendChild(pop);
     const r = $('#agent-config').getBoundingClientRect();
@@ -2978,6 +3132,13 @@ const agentsPop = {
     AGENT_REGISTRY.forEach(async (a) => { const el = pop.querySelector(`[data-ic="${a.id}"]`); const ic = await agentIconHtml(a.id); if (el) el.innerHTML = ic || `<span class="agent-abbr">${escapeHtml(a.label.slice(0, 2))}</span>`; });
     this.markInstalled(pop);
     this.markSkill(pop);
+    // ==== 二开: cockpit ==== 驾驶舱藏了文件状态栏，在设置面板留一个回合存档清理入口
+    const snapRow = pop.querySelector('[data-snap-entry]');
+    if (snapRow) snapRow.onclick = () => {
+      this.close();
+      const cur = term.sessions.find((x) => x.id === term.active);
+      snapshotPanel((cur && (cur.claudeProj || cur.cwd || cur.startDir)) || state.cwd || state.home);
+    };
     const wgCb = pop.querySelector('[data-webgl] input');
     if (wgCb) wgCb.onchange = () => { term.setWebgl(wgCb.checked); toast(wgCb.checked ? 'WebGL 渲染已开启' : '已切换兼容渲染（修中文乱码）'); };
     // ==== 二开: 终端字体（改完即生效；输入框内敲键不触发面板外的全局快捷键）====
@@ -3118,11 +3279,13 @@ function bindEvents() {
   tp.addEventListener('dragover', (ev) => {
     const t = ev.dataTransfer.types;
     if (t.includes('application/x-fanbox-tab')) return; // ==== 二开 ==== tab 排序拖拽，不是文件投喂
+    if (ev.target && ev.target.closest && ev.target.closest('#preview')) { tp.classList.remove('term-drop'); return; } // ==== 二开: cockpit ==== 右侧预览内拖拽不触发终端投喂
     if (!t.includes('Files') && !t.includes('application/x-fanbox-path') && !t.includes('text/plain')) return;
     ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; tp.classList.add('term-drop');
   });
   tp.addEventListener('dragleave', (ev) => { if (!tp.contains(ev.relatedTarget)) tp.classList.remove('term-drop'); });
   tp.addEventListener('drop', async (ev) => {
+    if (ev.target && ev.target.closest && ev.target.closest('#preview')) { tp.classList.remove('term-drop'); return; } // ==== 二开: cockpit ====
     ev.preventDefault(); tp.classList.remove('term-drop');
     // 系统拖入（Finder 文件 / 截图浮窗缩略图）：有真实路径直接用；file-promise 没路径就落盘临时目录
     const files = ev.dataTransfer.files ? [...ev.dataTransfer.files] : [];
@@ -3732,25 +3895,63 @@ const term = {
     $('#btn-terminal').classList.remove('active');
     localStorage.setItem('fb_term_open', '0');
   },
-  // 标签布局快照：几个标签、各在哪个目录、谁在前台。renderTabs 是所有标签变化的必经之路，在那里落
+  // ==== 二开: cockpit —— 标签快照升级（连同绑定的会话 ID、引擎、上次模型、标题与右侧打开的文件一并持久化，重启自动原位续接）====
   persistTabs() {
+    if (this._restoring) return;
     try {
       localStorage.setItem('fb_term_tabs', JSON.stringify({
-        tabs: this.sessions.map((s) => ({ cwd: s.cwd || s.startDir || '' })),
+        tabs: this.sessions.map((s) => ({
+          cwd: s.claudeProj || s.cwd || s.startDir || '',
+          sid: (!s.dead && s.claudeSessionId) || '',
+          agent: (!s.dead && s.sessionAgent) || '',
+          model: (!s.dead && s.sessionModel) || '',
+          title: (!s.dead && s.claudeSessionId && s.title) || '',
+          file: s.cockpitFile ? { name: s.cockpitFile.name, path: s.cockpitFile.path, kind: s.cockpitFile.kind, isDir: false } : null,
+        })),
         active: this.sessions.findIndex((s) => s.id === this.active),
       }));
     } catch { /* */ }
   },
-  // 下次打开时还原上面的快照：进程不复活（shell 全新），但打开就是你离开时的格局
+  // 下次打开时还原上面的快照：挂着 claude/agy 会话的标签自动在对应项目目录以原模型原位续接，右侧开着的文件一并恢复
   async restore(saved) {
-    $('#terminal-panel').classList.remove('hidden');
-    $('#terminal-resizer').classList.remove('hidden');
-    this.applyDock();
-    $('#btn-terminal').classList.add('active');
-    for (const t of (saved.tabs || []).slice(0, 8)) await this.newTab(t.cwd || undefined);
-    const want = this.sessions[saved.active];
+    this._restoring = true;
+    let resumedAny = false;
+    try {
+      $('#terminal-panel').classList.remove('hidden');
+      $('#terminal-resizer').classList.remove('hidden');
+      this.applyDock();
+      $('#btn-terminal').classList.add('active');
+      for (const t of (saved.tabs || []).slice(0, 16)) {
+        const sess = await this.newTab(t.cwd || undefined);
+        if (!sess || sess.dead) continue;
+        if (t.file && t.file.path) sess.cockpitFile = cockpitPreview.entryOf(t.file.path, t.file);
+        if (t.sid) {
+          const agent = t.agent || 'claude';
+          sess.claudeSessionId = t.sid;
+          sess.sessionAgent = agent;
+          sess.sessionModel = t.model || '';
+          sess.claudeProj = t.cwd || sess.startDir;
+          sess.sessSpawnT = Date.now() + 10000; // 多标签并发拉起，给足 25s 启动宽限期防误摘标签
+          if (t.title) sess.title = t.title;
+          let extOpen = false;
+          try {
+            const h = await api('/api/session-host?id=' + encodeURIComponent(t.sid) + '&agent=' + encodeURIComponent(agent));
+            if (h && h.open && !h.termId) extOpen = true;
+          } catch { /* */ }
+          if (!extOpen) {
+            this.input(sess.id, buildSessionResumeCmd(agent, t.sid, t.model || '') + '\r');
+            resumedAny = true;
+          }
+        }
+      }
+    } finally {
+      this._restoring = false;
+    }
+    const want = this.sessions[saved.active] || this.sessions[0];
     if (want) this.activate(want.id);
-    if (!this.sessions.length) this.newTab(); // 快照坏了也保证有一个标签
+    if (!this.sessions.length) await this.newTab(); // 快照坏了也保证有一个标签
+    this.renderTabs();
+    if (resumedAny) { refreshSessionOpenState(); scheduleSessRefresh(); }
     player.refreshHint();
     localStorage.setItem('fb_term_open', '1');
   },
@@ -3859,9 +4060,9 @@ const term = {
   },
   // 该会话前台是不是裸 shell？判断不了一律按「不是」处理——宁可新开标签，也不往运行中的程序里打字
   async isPlainShell(s) {
-    // ==== 二开: cockpit ==== 挂着 claude 会话标签的 tab 一律不算裸 shell：claudex 包装脚本不 exec，
-    // 前台进程组长是 zsh，node-pty 的 proc 会误报 'zsh'（claude 明明活着）——别把命令打进 claude 里
-    if (s.claudeSessionId) return false;
+    // ==== 二开: cockpit ==== 挂着会话标签或正在启动会话的 tab 一律不算裸 shell：claudex 包装脚本不 exec，
+    // 前台进程组长是 zsh，node-pty 的 proc 会误报 'zsh'（agent 明明活着）——别把命令打进运行中的会话里
+    if (s.claudeSessionId || s.claudeProj) return false;
     try {
       const r = await window.fanboxPty.proc(s.id);
       if (!r || !r.ok || !r.proc) return false;
@@ -3915,11 +4116,20 @@ const term = {
   // rowHint：点击处逻辑行的末物理行号（buffer 绝对行），回扫 scrollback 的起点
   async openTermPath(id, raw, tail, rowHint) {
     let p = String(raw).replace(/^['"]+/, '').replace(/[)\]'"`,:;]+$/, '');
-    let cwd = state.cwd;
+    // ==== 二开: cockpit ==== 兼容 file:// URI 与末尾 :line(:col) / #Lline 行号后缀；基准目录取该 tab 自身目录
+    if (/^file:\/\//i.test(p)) {
+      try { p = decodeURIComponent(p.replace(/^file:\/\/(localhost)?/i, '')); } catch { p = p.replace(/^file:\/\/(localhost)?/i, ''); }
+    }
+    let lineJump = 0;
+    const mLine = p.match(/^(.+?)(?::(\d+)(?::\d+)?|#L(\d+)(?:-L?\d+)?)$/);
+    if (mLine) { p = mLine[1]; lineJump = Number(mLine[2] || mLine[3]) || 0; }
+    else { const mt = String(tail || '').match(/^:(\d+)/); if (mt) lineJump = Number(mt[1]) || 0; }
+    const ownSess = this.sessions.find((x) => x.id === id);
+    let cwd = (ownSess && (ownSess.claudeProj || ownSess.cwd || ownSess.startDir)) || state.cwd;
+    try { const r0 = await window.fanboxPty.cwd(id); if (r0 && r0.ok && r0.cwd) cwd = r0.cwd; } catch { /* */ }
     let candidate = p;
     const isRel = !p.startsWith('/') && !p.startsWith('~');
     if (isRel) {
-      try { const r = await window.fanboxPty.cwd(id); if (r && r.ok && r.cwd) cwd = r.cwd; } catch { /* */ }
       candidate = (cwd || '').replace(/\/$/, '') + '/' + p.replace(/^\.\//, '');
     }
     const name = p.replace(/\/+$/, '').split('/').pop(); // 去掉目录结尾 / 再取 basename，否则名为空 basename 搜索失效
@@ -3927,14 +4137,25 @@ const term = {
     const alt = isRel ? this.scanScrollbackFor(id, name, rowHint) : '';
     // 活跃项目根（浏览目录 + 各终端项目目录）作 basename 搜索的额外根
     const roots = [];
-    if (state.cwd) roots.push(state.cwd);
-    this.sessions.forEach((x) => { const d = x.cwd || x.startDir; if (d && !roots.includes(d)) roots.push(d); });
+    if (cwd) roots.push(cwd);
+    if (state.cwd && !roots.includes(state.cwd)) roots.push(state.cwd);
+    this.sessions.forEach((x) => { const d = x.claudeProj || x.cwd || x.startDir; if (d && !roots.includes(d)) roots.push(d); });
     const q = encodeURIComponent;
     const r = await api(`/api/locate?path=${q(candidate)}&name=${q(name)}&root=${q(cwd || state.home)}&tail=${q(tail || '')}&alt=${q(alt)}&roots=${q(roots.join('\n'))}`);
     if (!r.found) { toast('没找到「' + name + '」', true); return; }
-    if (r.isDir) { navigate(r.path); toast('已跳到该目录'); return; }
+    if (r.isDir) { navigate(r.path); toast('已跳到目录：' + baseOf(r.path)); return; }
+    if (cockpitOn()) {
+      const e = cockpitPreview.entryOf(r.path, r.entry);
+      if (lineJump > 0) e._lineJump = lineJump;
+      if (ownSess) ownSess.cockpitFile = e;
+      recordRecent(r.path);
+      if (this.active === id) await openPreview(e);
+      toast(r.viaSearch ? '未精确命中，已打开最接近的「' + baseOf(r.path) + '」' : (r.viaScrollback ? '已按会话里出现过的路径打开' : '已在右侧展开'));
+      return;
+    }
     await navigate(dirOf(r.path));
     const e = state.entries.find((x) => x.path === r.path) || { path: r.path, name: baseOf(r.path), kind: 'text', isDir: false };
+    if (lineJump > 0) e._lineJump = lineJump;
     applySelection(r.path); openPreview(e); recordRecent(r.path);
     toast(r.viaSearch ? '未精确命中，已打开最接近的「' + baseOf(r.path) + '」' : (r.viaScrollback ? '已按会话里出现过的路径打开' : '已打开'));
   },
@@ -4097,8 +4318,24 @@ const term = {
     xterm.onResize(({ cols, rows }) => { sess.lastInput = Date.now(); window.fanboxPty.resize(id, cols, rows); }); // resize 引发的 TUI 重绘不算 agent 干活
     window.fanboxPty.resize(id, xterm.cols, xterm.rows); // spawn 等待期间 fit 过的 resize 事件无人监听会丢：补发一次对齐 PTY
 
+    // #66 豆包等输入法的中文标点不走组合（keyCode 不是 229）：xterm 在 keydown 就按键位发出英文 , . 并拦下默认行为，
+    // 输入法真正给出的「，。」随之被吞。标点键照 xterm 对 A-Z 的老办法放到 keypress 再发——它带的就是输入法给的字符；
+    // 多字符标点（……——）走 input 事件由下面接住；两样都没来（keyup 时还悬着）就按键位补发，保证不丢字
+    let punct = null;
+    host.addEventListener('input', (ev) => {
+      if (!punct || ev.inputType !== 'insertText' || !ev.data || ev.isComposing) return;
+      punct = null;
+      ev.stopPropagation(); // xterm 自己的 input 处理在 keydown 未抬起时本就不收，这里接手，免得两边都发
+      try { ev.target.value = ''; } catch { /* */ }
+      this.input(id, ev.data);
+    }, true);
     // 自定义键盘处理：⌘C 有选中文本则复制，否则发 SIGINT；⌘V 粘贴；⌘+/⌘-/⌘0 字体缩放
     xterm.attachCustomKeyEventHandler((e) => {
+      if (e.type === 'keydown') {
+        punct = null;
+        if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing && e.keyCode !== 229 && e.key.length === 1 && /[^\p{L}\p{N}\s]/u.test(e.key)) { punct = e.key; return false; }
+      } else if (e.type === 'keypress') punct = null;
+      else if (e.type === 'keyup' && punct) { const k = punct; punct = null; this.input(id, k); }
       const cmd = e.metaKey || e.ctrlKey;
       if (cmd && (e.key === 'c' || e.key === 'C')) {
         if (xterm.hasSelection()) {
@@ -4226,6 +4463,12 @@ const term = {
             });
           };
           let m;
+          // ==== 二开: cockpit ==== file:// URI 直接交给 openTermPath 在当前 tab 右侧展开（防后续按冒号切断）
+          const reF = /\bfile:\/\/[^\s'"`<>）（【】「」，。、？！；]+/g;
+          while ((m = reF.exec(t)) !== null) {
+            const furl = m[0].replace(/[)\],.:;。，？！?!）】>]+$/, '');
+            push(m.index, m.index + furl.length, furl, '', () => this.openTermPath(id, furl, '', endRow));
+          }
           // 0. URL：直接系统浏览器打开（Electron 的 windowOpenHandler 会转 shell.openExternal）
           // 全角标点不可能裸出现在合法 URL 里（必须百分号编码），排除掉防止「url、后续散文」粘连
           const reU = /\bhttps?:\/\/[^\s'"`<>）（【】「」，。、？！：；]+/g;
@@ -4323,6 +4566,8 @@ const term = {
     if (cur) cur.unread = false; // 切到该标签即清未读
     this.renderTabs();
     const s = this.sessions.find((x) => x.id === id);
+    // ==== 二开: cockpit ==== 切换 tab 时同步切换右侧文件展开区（各 tab 独立，不串会话）
+    if (cockpitOn()) cockpitPreview.sync(s);
     if (s) {
       this.fitActive();
       setTimeout(() => s.xterm.focus(), 0);
@@ -4339,7 +4584,7 @@ const term = {
     s.host.remove();
     this.sessions.splice(i, 1);
     updateWatches(); // 该终端的项目目录不再需要监听
-    if (!this.sessions.length) { this.close(); return; }
+    if (!this.sessions.length) { if (cockpitOn()) cockpitPreview.sync(null); this.close(); return; }
     if (this.active === id) this.activate(this.sessions[Math.max(0, i - 1)].id);
     else this.renderTabs();
   },
@@ -4462,7 +4707,7 @@ const term = {
   // 到了边界再按才翻历史。读屏判定（❯ 前缀 + ── 边框），返回要改发的序列（\x01=行首 \x05=行尾，
   // claude 的 readline 快捷键），认不出的形态一律返回 false 放行原生键——最差退回原生行为
   arrowBoundary(sess, xterm, key) {
-    if (!sess.claudeSessionId) return false; // 只对挂 claude 会话的 tab 生效
+    if (!sess.claudeSessionId || sess.sessionAgent === 'agy') return false; // 只对挂 claude 会话的 tab 生效（agy 自带光标边界处理）
     const buf = xterm.buffer.active;
     // 注意：claude TUI 本身就跑在 alternate screen，不能按 buf.type 排除 vim/less——
     // 靠屏读特征（❯ 行 + 续行缩进 + 底边框）区分，vim/less 画不出这个组合
@@ -4573,23 +4818,26 @@ const term = {
     bar.innerHTML = '';
     this.sessions.forEach((s) => {
       const t = document.createElement('div');
-      // ==== 二开: cockpit ==== 挂了 claude 会话的 tab，圆点用侧栏同款四态色（数据同源 sessUI）；
-      // 普通 shell tab 保持上游的 busy/idle/dead 三态
+      // ==== 二开: cockpit ==== 挂了会话的 tab，圆点用侧栏同款四态色（数据同源 sessUI），图标显示对应引擎官方 Logo；
+      // 普通 shell tab 保持上游的 busy/idle/dead 三态与通用终端图标
       let dotState = s.dead ? 'dead' : (s.status === 'busy' ? 'busy' : 'idle');
       let dotTitle = s.dead ? '进程已退出' : (s.status === 'busy' ? 'agent 运行中' : '空闲');
+      let sessAg = !s.dead ? (s.sessionAgent || '') : '';
       if (!s.dead && s.claudeSessionId && typeof sessUI !== 'undefined') {
         const info = sessUI.projects.flatMap((p) => p.sessions).find((x) => x.id === s.claudeSessionId);
+        if (info && info.agent && !sessAg) sessAg = info.agent;
         const st = info && SESS_STATUS[info.status];
         if (st) { dotState = st.cls; dotTitle = st.label; }
       }
       const followed = follow.on && follow.sid === s.id; // 文件跟随正盯着这个 tab
       t.className = 'term-tab' + (s.id === this.active ? ' active' : '') + (s.unread ? ' unread' : '') + (followed ? ' following' : '');
-      // 终端图标按项目路径染色：同项目同色，和面包屑的配对色点呼应
+      // 终端图标按项目路径染色：同项目同色，和面包屑的配对色点呼应；挂了 agent 会话则直接展示 Claude / Antigravity 图标
       const hue = this.hueOf(s.cwd || s.startDir);
       t.title = followed ? '文件跟随正盯着这个终端 · 双击跳到它所在目录' : '双击：文件区跳到该终端所在目录';
       const eye = followed ? `<span class="tab-eye" title="文件跟随盯着它">${ic('eye', 'currentColor', 11)}</span>` : '';
       const zap = s.agentTouch && Date.now() - s.agentTouch < 8000 ? '<span class="tab-zap" title="正被 agent 控制">⚡</span>' : ''; // 被 agent 遥控过闪 8 秒：审计 + 围观
-      t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${eye}${zap}${ic('term', `hsl(${hue} 62% 48%)`, 12)}<span>${escapeHtml(s.title)}</span><span class="tab-x" title="关闭">✕</span>`;
+      const tabIc = sessAg ? `<img class="tab-agent-ic" src="${sessAgentMeta(sessAg).icon}" alt="">` : ic('term', `hsl(${hue} 62% 48%)`, 12);
+      t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${eye}${zap}${tabIc}<span>${escapeHtml(s.title)}</span><span class="tab-x" title="关闭">✕</span>`;
       t.onclick = (e) => { if (e.target.classList.contains('tab-x')) { this.closeTab(s.id); return; } this.activate(s.id); };
       t.ondblclick = (e) => { if (e.target.classList.contains('tab-x')) return; this.locateCwd(); };
       // ==== 二开: tab 拖拽排序（HTML5 drag，只重排 sessions 数组，PTY/xterm 实例不动）====
@@ -5607,8 +5855,8 @@ if (window.fanboxFs) {
       await refresh();
       if (follow.on && follow.path && state.selected === follow.path) return; // 跟随有自己的实时渲染，别用 openPreview 顶掉（md 会被转进编辑器）
       if (state.selected && !$('#preview').classList.contains('hidden') && !$('#ed-host') && !imgEditState) {
-        const e = state.entries.find((x) => x.path === state.selected);
-        if (e && (e.kind === 'text' || e.kind === 'image')) openPreview(e);
+        const e = state.entries.find((x) => x.path === state.selected) || (cockpitOn() ? cockpitPreview.activeFile() : null);
+        if (e && (e.kind === 'text' || e.kind === 'image')) openPreview({ ...e, mtime: Date.now() });
       }
     }, 250);
   });
@@ -5994,12 +6242,27 @@ async function init() {
   bindSidebarResizer();
   bindSelectionToTerminal();
   enableTooltips();
-  // md 里直接引用本地文件路径的图片，按页面 URL 解析必 404：加载失败时解析成
-  // 绝对路径走 /fs/ 镜像端点兜底显示。文档源码保持干净的文件路径，预览和 Crepe 里都能看图
+  // md 里直接引用本地文件路径的图片，按页面 URL 解析必 404：加载失败时解析成绝对路径兜底显示。
+  // 文档源码保持干净的文件路径，预览和 Crepe 里都能看图。
+  // 兜底目标是缩略图端点，不是 /fs/ 原图——富文本编辑器里每一张图都走这条兜底，
+  // 而 Crepe 的 image-block 是组件化 NodeView，重排/改属性会把整个 DOM 换掉，
+  // fsStage 标记随之消失、这条兜底会反复重跑。指向原图 = 每次都重新解码一张全尺寸位图
+  // （一张手机照片 48MB），指向缩略图 = 同一个 URL 命中浏览器缓存，几乎零成本。
+  // 能安全缩的才缩：gif 缩了会变静态，svg 是矢量，这两类仍走 /fs/ 原图
   $('#preview-body').addEventListener('error', (ev) => {
     const img = ev.target;
-    if (!(img instanceof HTMLImageElement) || img.dataset.fsTried) return;
+    if (!(img instanceof HTMLImageElement)) return;
+    const stage = img.dataset.fsStage || '';
+    if (stage === 'fs') return; // 原图这一跳都失败了，没有下一手，让它裂着
     const src = decodeURI(img.getAttribute('src') || '');
+    // 缩略图那一跳失败（sips 不认这个文件等）→ 退回原图再试一次，别让它当场裂掉
+    if (stage === 'thumb') {
+      const abs0 = img.dataset.fsAbs || '';
+      if (!abs0) return;
+      img.dataset.fsStage = 'fs';
+      img.src = '/fs' + encodeURI(abs0);
+      return;
+    }
     if (/^(https?:|data:|blob:)/.test(src) || src.startsWith('/api/') || src.startsWith('/fs/')) return;
     let abs = src;
     if (!abs.startsWith('/')) {
@@ -6009,8 +6272,9 @@ async function init() {
       }
       abs = '/' + stack.filter(Boolean).join('/');
     }
-    img.dataset.fsTried = '1';
-    img.src = '/fs' + encodeURI(abs);
+    img.dataset.fsAbs = abs;
+    if (canThumb(abs)) { img.dataset.fsStage = 'thumb'; img.src = thumbUrl(abs, displayImgWidth()); }
+    else { img.dataset.fsStage = 'fs'; img.src = '/fs' + encodeURI(abs); }
   }, true);
   document.querySelectorAll('#theme-switch .theme-seg button').forEach((b) => { b.onclick = () => applyTheme(b.dataset.skin); });
   await loadRoots();
@@ -6081,13 +6345,160 @@ function bindUpdateNotice() {
 // 与设置面板「WebGL 加速渲染」同一逻辑，对所有已开标签立即生效
 window.fbWebgl = (on) => { term.setWebgl(!!on); console.log('[fanbox] WebGL ' + (on ? '已开启' : '已关闭（DOM renderer 兼容渲染）') + '，已对所有终端标签生效'); return !!on; };
 
-// ==== 二开: cockpit —— 驾驶舱布局开关（默认开）====
-// 左侧栏 + 右侧全宽终端，文件区/预览隐藏不删（代码照常运行，只是 display:none）。
-// 控制台 fbCockpit(false) 随时切回原版三栏排查问题。
+// ==== 二开: cockpit —— 驾驶舱布局开关 + 按 tab 隔离的终端右侧文件预览 ====
+// 左侧栏 + 右侧工作台（顶栏 .term-head 统领下方 #term-body = 左 #xterm-host + 右 #preview）。
+// 每个终端 tab 独立持有 s.cockpitFile：切 tab 时终端与右侧文件区整体切换，互不串会话；
+// 控制台 fbCockpit(false) 随时把 #preview 迁回 #filemgmt 恢复原版三栏。
+const cockpitPreview = {
+  _seq: 0,
+  _switching: false,
+  _shownPath: '',
+  entryOf(filePath, srvEntry) {
+    const name = baseOf(filePath);
+    const ex = (name.includes('.') ? name.split('.').pop() : '').toLowerCase();
+    // 补上服务端 TEXT_EXT 未列的常见纯文本后缀（如 jsonl / lock）
+    if (srvEntry && srvEntry.path) {
+      if (srvEntry.kind === 'other' && ['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'].includes(ex)) return { ...srvEntry, kind: 'office' };
+      if (srvEntry.kind === 'other' && ['jsonl', 'ndjson', 'lock', 'gitignore', 'npmrc', 'nvmrc'].includes(ex)) return { ...srvEntry, kind: 'text' };
+      return srvEntry;
+    }
+    let kind = 'other';
+    if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif', 'tiff', 'tif'].includes(ex)) kind = 'image';
+    else if (['mp4', 'webm', 'mov', 'm4v', 'ogv'].includes(ex)) kind = 'video';
+    else if (['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'].includes(ex)) kind = 'audio';
+    else if (ex === 'pdf') kind = 'pdf';
+    else if (['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'].includes(ex)) kind = 'office';
+    else if (ARCHIVE_EXT.has(ex)) kind = 'archive';
+    else if (['txt', 'md', 'markdown', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'json', 'json5', 'jsonl', 'ndjson', 'html', 'htm', 'css', 'scss', 'less', 'py', 'rb', 'go', 'rs', 'java', 'kt', 'swift', 'c', 'h', 'cpp', 'hpp', 'cc', 'm', 'mm', 'sh', 'bash', 'zsh', 'fish', 'sql', 'yml', 'yaml', 'toml', 'ini', 'env', 'conf', 'xml', 'vue', 'astro', 'php', 'lua', 'r', 'dart', 'gradle', 'properties', 'gitignore', 'dockerfile', 'makefile', 'log', 'lock', 'csv', 'tsv', 'gql', 'graphql', 'prisma', 'plist', 'tex', 'rtf', 'srt', 'vtt', 'ass'].includes(ex) || /^(dockerfile|makefile|readme|license|\.[a-z]+rc)$/i.test(name)) kind = 'text';
+    return { name, path: filePath, isDir: false, kind, size: 0, mtime: Date.now() };
+  },
+  activeFile() {
+    const s = term.sessions.find((x) => x.id === term.active);
+    return (s && s.cockpitFile) || null;
+  },
+  async sync(targetSess) {
+    const seq = ++this._seq;
+    await guardDirty();
+    if (seq !== this._seq) return;
+    const want = targetSess && !targetSess.dead ? targetSess.cockpitFile : null;
+    if (!want) {
+      mona.disposeIfAny(); crepe.disposeIfAny(); imgEditState = null;
+      if (previewMax) setPreviewMax(false);
+      $('#preview').classList.add('hidden');
+      $('#preview-resizer').classList.add('hidden');
+      state.selected = null;
+      this._shownPath = '';
+      term.fitActive();
+      return;
+    }
+    if (!$('#preview').classList.contains('hidden') && this._shownPath === want.path) return;
+    this._switching = true;
+    this._shownPath = want.path;
+    try {
+      await openPreview({ ...want, mtime: Date.now() });
+    } finally {
+      this._switching = false;
+    }
+    if (targetSess && term.active === targetSess.id) {
+      setTimeout(() => { try { targetSess.xterm.focus(); } catch { /* */ } }, 10);
+    }
+  },
+};
+
+// ==== 二开: office —— Office 三件套（Excel 多 Sheet 表格 / Word 富文本含内嵌图 / PPT 原版 PDF·卡片流）前端渲染 ====
+async function renderOfficePreview(e) {
+  const body = $('#preview-body');
+  const isPpt = /\.(pptx|ppt)$/i.test(e.name);
+  if (isPpt) body.innerHTML = '<div class="cmdk-loading">正在渲染幻灯片排版…</div>';
+  let d;
+  try { d = await api('/api/office?path=' + encodeURIComponent(e.path)); }
+  catch (err) { d = { ok: false, error: err && err.message }; }
+  if (state.selected !== e.path) return; // 异步等待期间已切走
+  if (!d || !d.ok) {
+    body.innerHTML = `<div class="empty-state"><div class="big">${iconSvg(e, 48)}</div>${escapeHtml((d && d.error) || '无法原地预览，请点右上角「打开」查看')}<br><br>${fmtSize(e.size)}</div>`;
+    return;
+  }
+  const baseMeta = (extra = '') => `<div class="preview-meta"><span>${escapeHtml(d.ext || '')}</span><span>${fmtSize(d.size || e.size)}</span>${extra}<span>${fmtTime(d.mtime || e.mtime)}</span></div>`;
+  if (d.sub === 'pdf' && d.pdfUrl) {
+    body.innerHTML = `<iframe class="iframe-preview" src="${d.pdfUrl}"></iframe>`;
+    return;
+  }
+  if (d.sub === 'doc') {
+    body.innerHTML = baseMeta() + `<div class="md-body office-doc">${d.html || ''}</div>`;
+    body.querySelectorAll('.office-doc img').forEach((im) => {
+      im.style.cursor = 'zoom-in';
+      im.onclick = () => {
+        const ov = document.createElement('div'); ov.className = 'lightbox';
+        ov.innerHTML = `<img src="${im.src}"><div class="lb-hint">点击空白处关闭 · 滚轮缩放</div>`;
+        let sc = 1; const big = ov.querySelector('img');
+        ov.onclick = (ev) => { if (ev.target === ov) ov.remove(); };
+        ov.onwheel = (ev) => { ev.preventDefault(); sc = Math.min(8, Math.max(0.2, sc - ev.deltaY * 0.002)); big.style.transform = `scale(${sc})`; };
+        document.body.appendChild(ov);
+      };
+    });
+    return;
+  }
+  if (d.sub === 'sheet') {
+    const sheets = d.sheets || [];
+    if (!sheets.length) { body.innerHTML = baseMeta() + '<div class="empty-state">工作簿为空</div>'; return; }
+    let curIdx = Math.max(0, sheets.findIndex((s) => s.rows && s.rows.length));
+    const paint = () => {
+      const sh = sheets[curIdx] || sheets[0];
+      const rowInfo = `<span>${sh.truncated ? `前 ${sh.rows.length} / 共 ${sh.totalRows} 行` : `${sh.totalRows} 行`}</span>`;
+      const tabsHtml = sheets.length > 1
+        ? `<div class="office-tabs">${sheets.map((s, i) => `<button class="office-tab${i === curIdx ? ' active' : ''}" data-idx="${i}">${escapeHtml(s.name)}<i>${s.totalRows}</i></button>`).join('')}</div>`
+        : '';
+      let tbl = '<div class="empty-state">此工作表为空</div>';
+      if (sh.rows && sh.rows.length) {
+        tbl = '<div class="csv-wrap office-sheet-wrap"><table class="csv-table"><thead><tr>'
+          + sh.rows[0].map((c) => `<th>${escapeHtml(c)}</th>`).join('')
+          + '</tr></thead><tbody>'
+          + sh.rows.slice(1).map((r) => '<tr>' + r.map((c) => `<td>${escapeHtml(c)}</td>`).join('') + '</tr>').join('')
+          + '</tbody></table></div>';
+      }
+      body.innerHTML = baseMeta(rowInfo) + tabsHtml + tbl;
+      body.querySelectorAll('.office-tab').forEach((btn) => {
+        btn.onclick = () => { curIdx = Number(btn.dataset.idx) || 0; paint(); };
+      });
+    };
+    paint();
+    return;
+  }
+  if (d.sub === 'slides') {
+    const slides = d.slides || [];
+    if (!slides.length) { body.innerHTML = baseMeta() + '<div class="empty-state">未提取到幻灯片内容</div>'; return; }
+    body.innerHTML = baseMeta(`<span>${slides.length} 页幻灯片</span>`) + `<div class="office-slides">${slides.map((sl) => {
+      const [head, ...rest] = sl.paras || [];
+      return `<section class="office-slide">
+        <div class="office-slide-no">${String(sl.index).padStart(2, '0')} / ${slides.length}</div>
+        ${head ? `<h3 class="office-slide-title">${escapeHtml(head)}</h3>` : ''}
+        ${rest.map((p) => `<p>${escapeHtml(p)}</p>`).join('')}
+        ${(sl.images || []).length ? `<div class="office-slide-imgs">${sl.images.map((u) => `<img src="${u}" alt="">`).join('')}</div>` : ''}
+      </section>`;
+    }).join('')}</div>`;
+  }
+}
 function cockpitOn() { return localStorage.getItem('fb_cockpit') !== '0'; }
 function applyCockpit(on) {
   document.getElementById('app').classList.toggle('cockpit', on);
-  if (on && term.available() && $('#terminal-panel').classList.contains('hidden') && term.sessions.length) term.open();
+  let tb = document.getElementById('term-body');
+  const pv = $('#preview'), pvr = $('#preview-resizer');
+  if (on) {
+    if (!tb) {
+      tb = document.createElement('div');
+      tb.id = 'term-body';
+      const host = $('#xterm-host');
+      host.parentNode.insertBefore(tb, host);
+      tb.appendChild(host);
+    }
+    if (pvr && pv && pvr.parentNode !== tb) tb.append(pvr, pv);
+    if (term.available() && $('#terminal-panel').classList.contains('hidden') && term.sessions.length) term.open();
+    cockpitPreview.sync(term.sessions.find((x) => x.id === term.active));
+  } else if (tb) {
+    const fm = $('#filemgmt');
+    if (fm && pvr && pv && pvr.parentNode !== fm) fm.append(pvr, pv);
+    applyPreviewSize();
+  }
   try { term.fitActive(); } catch { /* 终端还没起来 */ }
 }
 window.fbCockpit = (on) => {

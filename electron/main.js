@@ -595,7 +595,7 @@ ipcMain.handle('pty:spawn', (e, { id, cwd, cols, rows, theme }) => {
   // 等。终端 PTY 继承下去后，里面启动的 claude 会以为自己是父会话的子 agent，不往自己 session 的 jsonl
   // 写任何对话（只写 mode/permission-mode 元信息）→ 对话内容丢失、claudex -r <id> 找不到会话。
   // 证据见 warp自定义/CLAUDE.md「☠️ 启动 GUI 必须清环境变量」节。清掉后终端里的 claude 是独立进程，正常落盘。
-  for (const k of ['CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH']) delete env[k];
+  for (const k of ['CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_PID']) delete env[k];
   // ==== 二开: TERM_PROGRAM 归属改写为 fanbox ====
   // FanBox 若从 Terminal.app 里启动（npm start），process.env 带 TERM_PROGRAM=Apple_Terminal，PTY 继承下去后
   // 里面的 claude 会以为宿主是 Apple Terminal：每次发通知前 osascript 查询 Terminal 的响铃设置——
