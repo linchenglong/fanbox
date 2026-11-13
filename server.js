@@ -44,6 +44,8 @@ const VIDEO_EXT = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv']);
 const AUDIO_EXT = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac']);
 const PDF_EXT = new Set(['pdf']);
 const ARCHIVE_EXT = new Set(['zip', 'jar', 'tar', 'tgz', 'gz', 'bz2', 'xz', '7z', 'rar']);
+// ==== 二开: office ==== Office 三件套原地预览分类
+const OFFICE_EXT = new Set(['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt']);
 
 const MIME = {
   html: 'text/html; charset=utf-8', htm: 'text/html; charset=utf-8',
@@ -83,6 +85,7 @@ function kindOf(name, isDir) {
   if (VIDEO_EXT.has(e)) return 'video';
   if (AUDIO_EXT.has(e)) return 'audio';
   if (PDF_EXT.has(e)) return 'pdf';
+  if (OFFICE_EXT.has(e)) return 'office'; // ==== 二开: office ====
   if (ARCHIVE_EXT.has(e)) return 'archive';
   if (TEXT_EXT.has(e) || /^(dockerfile|makefile|readme|license|\.[a-z]+rc)$/i.test(name)) return 'text';
   return 'other';
@@ -658,7 +661,7 @@ const mungeClaudeDir = (cwd) => cwd.replace(/[^A-Za-z0-9]/g, '-');
 async function parseClaudeSession(fp, st) {
   const hit = projMemCache.get(fp);
   if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.sess;
-  const sess = { id: path.basename(fp, '.jsonl'), agent: 'claude', title: '', firstT: 0, lastT: st.mtimeMs, userMsgs: 0, files: [], skills: [], lastSignal: '', bg: [] };
+  const sess = { id: path.basename(fp, '.jsonl'), agent: 'claude', title: '', model: '', firstT: 0, lastT: st.mtimeMs, userMsgs: 0, files: [], skills: [], lastSignal: '', bg: [] };
   const filesSet = new Set(), skillsSet = new Set(), bgNotified = new Set();
   // 流式逐行，廉价字符串预判后才 JSON.parse——大会话文件也不整读进内存
   const stream = fs.createReadStream(fp, { encoding: 'utf8' });
@@ -672,7 +675,32 @@ async function parseClaudeSession(fp, st) {
     // ==== 二开: cockpit —— 四态判定的三个标量（lastSignal / bg 句柄栈 / 通知回收）====
     // sidechain（subagent 内部消息）不参与：它的收尾不代表主对话的收尾
     if (!line.includes('"isSidechain":true')) {
+      // 提取该会话最后一次选定/运行的模型（保留 [1m] 等上下文后缀，供续接时 --model 原样恢复）
+      if (line.includes('"type":"attachment"') && line.includes('"modelId":"')) {
+        try {
+          const d = JSON.parse(line);
+          const mid = d.attachment && d.attachment.type === 'model' && d.attachment.identity && d.attachment.identity.modelId;
+          if (mid && typeof mid === 'string') sess.model = mid.trim();
+        } catch { /* */ }
+      } else if (line.includes('<local-command-stdout>') && line.includes('Set model to')) {
+        try {
+          const d = JSON.parse(line);
+          const c = typeof (d.message && d.message.content) === 'string' ? d.message.content : '';
+          if (c.includes('<local-command-stdout>')) {
+            const m = c.replace(/\x1b\[[0-9;]*m/g, '').match(/Set model to `([A-Za-z0-9._:\-\[\]\/]+)`/);
+            if (m) sess.model = m[1];
+          }
+        } catch { /* */ }
+      }
       if (line.includes('"type":"assistant"')) {
+        if (line.includes('"model":"')) {
+          const mm = line.match(/"model":"([A-Za-z0-9._:\-\[\]\/]+)"/);
+          if (mm) {
+            const rawM = mm[1];
+            // API 回包会剥掉 [1m] 后缀：若当前已记了同源带后缀名则保留完整名，换了其它模型才更新
+            if (!sess.model || sess.model.replace(/\[[^\]]*\]$/, '') !== rawM.replace(/\[[^\]]*\]$/, '')) sess.model = rawM;
+          }
+        }
         if (line.includes('"type":"tool_use"')) {
           try {
             const d = JSON.parse(line);
@@ -778,21 +806,27 @@ async function liveClaudeSessionIds() {
   return ids;
 }
 
-// ==== 二开: cockpit —— 某个活会话跑在哪：FanBox 终端 id 或外部宿主 ====
+// ==== 二开: cockpit —— 某个活会话跑在哪：FanBox 终端 id 或外部宿主（覆盖 Claude + Antigravity）====
 // 点击已打开的 session 时前端要「切换到对应 tab」而不是再开一个。前端只认自己标记过的 tab，
-// 手动在 FanBox 终端里敲 claudex 起的会话没有标记——靠 ps eww 读 claude 进程环境里的
-// FANBOX_TERM_ID（pty:spawn 注入的）来配对；读不到 = 会话在 iTerm/Warp 等外部宿主跑。
-async function sessionHost(sessId) {
+// 手动在 FanBox 终端里敲 claudex / agy 起的会话没有标记——靠 ps eww 读进程环境里的
+// FANBOX_TERM_ID（pty:spawn 注入的）来配对；读不到 = 会话在 iTerm/Warp/Terminal 等外部宿主跑。
+async function sessionHost(sessId, agent = '') {
+  if (!sessId) return { ok: true, open: false, termId: null };
   let pid = 0;
-  try {
-    for (const n of await fsp.readdir(CLAUDE_SESS_REG)) {
-      if (!n.endsWith('.json')) continue;
-      try {
-        const j = JSON.parse(await fsp.readFile(path.join(CLAUDE_SESS_REG, n), 'utf8'));
-        if (j && j.sessionId === sessId && j.pid) { pid = Number(j.pid); break; }
-      } catch { /* */ }
-    }
-  } catch { /* */ }
+  if (agent !== 'agy') {
+    try {
+      for (const n of await fsp.readdir(CLAUDE_SESS_REG)) {
+        if (!n.endsWith('.json')) continue;
+        try {
+          const j = JSON.parse(await fsp.readFile(path.join(CLAUDE_SESS_REG, n), 'utf8'));
+          if (j && j.sessionId === sessId && j.pid) { pid = Number(j.pid); break; }
+        } catch { /* */ }
+      }
+    } catch { /* */ }
+  }
+  if (!pid && agent !== 'claude') {
+    pid = (await liveAgySessions(true)).get(sessId) || 0;
+  }
   if (!pid) return { ok: true, open: false, termId: null };
   const envLine = await new Promise((resolve) => {
     execFile('ps', ['eww', '-o', 'command=', '-p', String(pid)], { timeout: 3000 }, (err, out) => resolve(err ? '' : String(out || '')));
@@ -812,6 +846,151 @@ function decideSessionStatus(sess, activeWindowMs, now = Date.now()) {
   if (sess.lastSignal === 'tool' && now - sess.lastT < activeWindowMs) return 'running';
   if (sess.lastSignal === 'ask') return 'waiting';
   if ((sess.bg || []).some((h) => now - h.t < SESS_BG_WINDOW && (!h.timeoutMs || now < h.t + h.timeoutMs + 30000))) return 'background';
+  return 'done';
+}
+
+// ==== 二开: cockpit —— Google Antigravity (agy) 会话索引、探活与四态判定 ====
+// 数据源：~/.gemini/antigravity-cli/conversation_summaries.db（SQLite WAL 权威索引）
+// 探活：活着的 agy 进程会持有 presence/<uuid>.lock 的打开 fd（pgrep 筛进程 + lsof 按 pid 定向读）
+// 四态：summary.status (CASCADE_RUN_STATUS_*) + 单会话库 steps 末步状态（9=WAITING 等待审批）
+const AGY_HOME = path.join(HOME, '.gemini', 'antigravity-cli');
+const AGY_SUM_DB = path.join(AGY_HOME, 'conversation_summaries.db');
+const AGY_CONV_DIR = path.join(AGY_HOME, 'conversations');
+const { fileURLToPath: agyFileUrlToPath } = require('url');
+let agySumCache = { sig: '', rows: [] };
+let liveAgyCache = { at: 0, map: new Map() };
+const agyStepCache = new Map(); // convId -> { sig, stepStatus }
+
+async function sqliteDbSig(dbPath) {
+  let st;
+  try { st = await fsp.stat(dbPath); } catch { return ''; }
+  let wal = null;
+  try { wal = await fsp.stat(dbPath + '-wal'); } catch { /* 非 WAL 或已 checkpoint */ }
+  return `${st.size}:${st.mtimeMs}:${wal ? wal.size + ':' + wal.mtimeMs : 0}`;
+}
+
+function querySqliteJson(dbPath, sql) {
+  return new Promise((resolve, reject) => {
+    execFile('/usr/bin/sqlite3', ['-json', dbPath, sql], { timeout: 3000, maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+      if (err) return reject(err);
+      const s = String(out || '').trim();
+      if (!s) return resolve([]);
+      try { resolve(JSON.parse(s)); } catch (e) { reject(e); }
+    });
+  });
+}
+
+async function listAgySummaries() {
+  const sig = await sqliteDbSig(AGY_SUM_DB);
+  if (!sig) return [];
+  if (sig === agySumCache.sig) return agySumCache.rows;
+  const sql = `SELECT conversation_id, title, preview, step_count, last_modified_time, workspace_uris, status, not_fully_idle
+    FROM conversation_summaries WHERE nesting_depth = 0 AND parent_conversation_id = ''
+    ORDER BY last_modified_time DESC LIMIT 500;`;
+  let raw, convSet;
+  try {
+    const [rowsOut, dirNames] = await Promise.all([
+      querySqliteJson(AGY_SUM_DB, sql),
+      fsp.readdir(AGY_CONV_DIR).catch(() => []),
+    ]);
+    raw = rowsOut;
+    convSet = new Set(dirNames);
+  } catch { return agySumCache.rows; }
+  const rows = [];
+  for (const r of raw) {
+    const id = String(r.conversation_id || '').trim();
+    if (!id || (convSet.size && !convSet.has(id + '.db'))) continue; // 排除单会话库已不存在的孤儿摘要
+    let cwd = '';
+    try {
+      const uris = JSON.parse(r.workspace_uris || '[]');
+      const u = Array.isArray(uris) ? uris.find((x) => typeof x === 'string' && x.startsWith('file://')) : '';
+      if (u) cwd = agyFileUrlToPath(u).replace(/\/+$/, '') || '/';
+    } catch { /* */ }
+    if (!cwd) continue;
+    const title = String(r.title || r.preview || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    const stepCount = Number(r.step_count) || 0;
+    if (!title && stepCount <= 0) continue;
+    const lastT = Date.parse(String(r.last_modified_time || '').replace(' ', 'T')) || 0;
+    rows.push({
+      id, cwd, title, stepCount, lastT,
+      rawStatus: String(r.status || ''),
+      notFullyIdle: Number(r.not_fully_idle) === 1,
+    });
+  }
+  agySumCache = { sig, rows };
+  return rows;
+}
+
+async function liveAgySessions(force = false) {
+  if (!force && Date.now() - liveAgyCache.at < 5000) return liveAgyCache.map;
+  const pids = await new Promise((resolve) => {
+    execFile('pgrep', ['-x', 'agy'], { timeout: 2000 }, (err, out) => {
+      resolve(String(out || '').split('\n').map((s) => Number(s.trim())).filter(Boolean));
+    });
+  });
+  const map = new Map();
+  if (pids.length) {
+    const out = await new Promise((resolve) => {
+      execFile('/usr/sbin/lsof', ['-nP', '-a', '-p', pids.join(','), '-F', 'pn'], { timeout: 3000 }, (err, stdout) => {
+        resolve(String(stdout || ''));
+      });
+    });
+    let curPid = 0;
+    for (const line of out.split('\n')) {
+      if (line.startsWith('p')) curPid = Number(line.slice(1)) || 0;
+      else if (curPid && line.startsWith('n')) {
+        const m = line.match(/\/antigravity-cli\/presence\/([0-9a-f-]{8,})\.lock$/i);
+        if (m) map.set(m[1], curPid);
+      }
+    }
+  }
+  liveAgyCache = { at: Date.now(), map };
+  return map;
+}
+
+function decodeAgyTailModel(hexStr) {
+  if (!hexStr) return '';
+  const b = Buffer.from(hexStr, 'hex');
+  // gen_metadata 末尾 protobuf field 21 (0xaa 0x01 <len> <utf8>) 记录该步实际生效的模型显示名
+  for (let i = b.length - 3; i >= 0; i--) {
+    if (b[i] === 0xaa && b[i + 1] === 0x01) {
+      const len = b[i + 2];
+      if (len >= 3 && len <= 80 && i + 3 + len <= b.length) {
+        const s = b.slice(i + 3, i + 3 + len).toString('utf8');
+        if (/^[\x20-\x7e]+$/.test(s)) return s.trim();
+      }
+    }
+  }
+  return '';
+}
+
+async function agyConvMeta(convId) {
+  const fp = path.join(AGY_CONV_DIR, convId + '.db');
+  const sig = await sqliteDbSig(fp);
+  if (!sig) return { stepStatus: 0, model: '' };
+  const hit = agyStepCache.get(convId);
+  if (hit && hit.sig === sig) return hit;
+  let stepStatus = 0, model = '';
+  try {
+    const sql = 'SELECT (SELECT status FROM steps ORDER BY idx DESC LIMIT 1) AS step_status, (SELECT hex(substr(data, -180)) FROM gen_metadata ORDER BY idx DESC LIMIT 1) AS tail_hex;';
+    const rows = await querySqliteJson(fp, sql);
+    if (rows.length) {
+      stepStatus = Number(rows[0].step_status) || 0;
+      model = decodeAgyTailModel(rows[0].tail_hex);
+    }
+  } catch { return hit || { stepStatus: 0, model: '' }; }
+  if (agyStepCache.size > 500) agyStepCache.clear();
+  const entry = { sig, stepStatus, model };
+  agyStepCache.set(convId, entry);
+  return entry;
+}
+
+// CortexStepStatus (protobuf): 1=PENDING, 2=RUNNING, 3=DONE, 8=GENERATING, 9=WAITING(审批确认), 11=QUEUED
+async function decideAgySessionStatus(row, stepSt, activeWindowMs, now = Date.now()) {
+  if (stepSt === 9) return 'waiting';
+  if (row.rawStatus === 'CASCADE_RUN_STATUS_RUNNING' || row.rawStatus === 'CASCADE_RUN_STATUS_BUSY' || row.rawStatus === 'CASCADE_RUN_STATUS_CANCELING') return 'running';
+  if ((stepSt === 1 || stepSt === 2 || stepSt === 8 || stepSt === 11) && now - row.lastT < activeWindowMs) return 'running';
+  if (row.notFullyIdle) return 'background';
   return 'done';
 }
 
@@ -1067,6 +1246,471 @@ async function archiveList(p) {
   return { ok: true, entries: entries.slice(0, MAX), truncated };
 }
 
+// ==== 二开: office —— Office 三件套（xlsx/xls · docx/doc · pptx/ppt）零 npm 依赖原地预览 ====
+const zlib = require('zlib');
+const officePdfInflight = new Map(); // cacheKey -> Promise<string|null>
+
+function xmlUnesc(s) {
+  return String(s || '')
+    .replace(/_x000D_\n?/gi, '\n')
+    .replace(/_x([0-9a-fA-F]{4})_/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+function htmlEsc(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function readOoxmlZip(buf) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65558); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('无效的 OOXML 文件结构');
+  const cdCount = buf.readUInt16LE(eocd + 10);
+  let pos = buf.readUInt32LE(eocd + 16);
+  const map = new Map();
+  for (let i = 0; i < cdCount && pos + 46 <= buf.length; i++) {
+    if (buf.readUInt32LE(pos) !== 0x02014b50) break;
+    const method = buf.readUInt16LE(pos + 10);
+    const compSize = buf.readUInt32LE(pos + 20);
+    const fnLen = buf.readUInt16LE(pos + 28);
+    const exLen = buf.readUInt16LE(pos + 30);
+    const cmLen = buf.readUInt16LE(pos + 32);
+    const localOffset = buf.readUInt32LE(pos + 42);
+    const name = buf.slice(pos + 46, pos + 46 + fnLen).toString('utf8');
+    map.set(name, { method, compSize, localOffset });
+    pos += 46 + fnLen + exLen + cmLen;
+  }
+  const getBuf = (name) => {
+    const e = map.get(name);
+    if (!e || e.localOffset + 30 > buf.length) return null;
+    if (buf.readUInt32LE(e.localOffset) !== 0x04034b50) return null;
+    const fnLen = buf.readUInt16LE(e.localOffset + 26);
+    const exLen = buf.readUInt16LE(e.localOffset + 28);
+    const start = e.localOffset + 30 + fnLen + exLen;
+    const raw = buf.slice(start, start + e.compSize);
+    if (e.method === 0) return raw;
+    if (e.method === 8) return zlib.inflateRawSync(raw);
+    return null;
+  };
+  const getText = (name) => { const b = getBuf(name); return b ? b.toString('utf8') : ''; };
+  return { names: [...map.keys()], getBuf, getText };
+}
+
+function parseXlsxBuffer(buf) {
+  const zip = readOoxmlZip(buf);
+  const shared = [];
+  const sstXml = zip.getText('xl/sharedStrings.xml');
+  if (sstXml) {
+    const siRe = /<(?:\w+:)?si[\s>][\s\S]*?<\/(?:\w+:)?si>/g;
+    let m;
+    while ((m = siRe.exec(sstXml)) !== null) {
+      const clean = m[0].replace(/<(?:\w+:)?rPh[\s>][\s\S]*?<\/(?:\w+:)?rPh>/g, '');
+      let text = '';
+      const tRe = /<(?:\w+:)?t(?:\s[^>]*)?>([\s\S]*?)<\/(?:\w+:)?t>/g;
+      let tm;
+      while ((tm = tRe.exec(clean)) !== null) text += xmlUnesc(tm[1]);
+      shared.push(text);
+    }
+  }
+  // 识别日期样式，把 Excel 序列号转回可读日期
+  const dateFmtIds = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 45, 46, 47, 50, 57, 58]);
+  const dateStyleIdx = new Set();
+  const stylesXml = zip.getText('xl/styles.xml');
+  if (stylesXml) {
+    const nfRe = /<(?:\w+:)?numFmt\b([^>]*)\/?>/g;
+    let m;
+    while ((m = nfRe.exec(stylesXml)) !== null) {
+      const idM = m[1].match(/\bnumFmtId="(\d+)"/);
+      const codeM = m[1].match(/\bformatCode="([^"]*)"/);
+      if (idM && codeM) {
+        const code = xmlUnesc(codeM[1]).replace(/\[[^\]]*\]/g, '').replace(/"[^"]*"/g, '');
+        if (/[ydh]/i.test(code) && !/[#0]\.[#0]/.test(code)) dateFmtIds.add(Number(idM[1]));
+      }
+    }
+    const xfsM = stylesXml.match(/<(?:\w+:)?cellXfs\b[^>]*>([\s\S]*?)<\/(?:\w+:)?cellXfs>/);
+    if (xfsM) {
+      const xfRe = /<(?:\w+:)?xf\b([^>]*)(?:\/>|>[\s\S]*?<\/(?:\w+:)?xf>)/g;
+      let idx = 0, xm;
+      while ((xm = xfRe.exec(xfsM[1])) !== null) {
+        const nf = xm[1].match(/\bnumFmtId="(\d+)"/);
+        if (nf && dateFmtIds.has(Number(nf[1]))) dateStyleIdx.add(idx);
+        idx++;
+      }
+    }
+  }
+  const fmtExcelDate = (num) => {
+    if (!Number.isFinite(num) || num < 1 || num > 2958465) return String(num);
+    const ms = Math.round((num - 25569) * 86400000);
+    const d = new Date(ms);
+    if (Number.isNaN(d.getTime())) return String(num);
+    const pad = (n) => String(n).padStart(2, '0');
+    const dayStr = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+    const secInDay = Math.round(((num % 1) + 1) % 1 * 86400);
+    if (secInDay >= 60) return `${dayStr} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+    return dayStr;
+  };
+  const relMap = new Map();
+  const relXml = zip.getText('xl/_rels/workbook.xml.rels');
+  if (relXml) {
+    const rRe = /<Relationship\b([^>]*)\/?>/g;
+    let m;
+    while ((m = rRe.exec(relXml)) !== null) {
+      const idM = m[1].match(/\bId="([^"]+)"/), tgM = m[1].match(/\bTarget="([^"]+)"/);
+      if (idM && tgM) {
+        let tg = tgM[1].replace(/^\/+/, '');
+        if (!tg.startsWith('xl/')) tg = 'xl/' + tg.replace(/^\.\//, '');
+        relMap.set(idM[1], tg);
+      }
+    }
+  }
+  const sheetDefs = [];
+  const wbXml = zip.getText('xl/workbook.xml');
+  if (wbXml) {
+    const shRe = /<(?:\w+:)?sheet\b([^>]*)\/?>/g;
+    let m;
+    while ((m = shRe.exec(wbXml)) !== null) {
+      const nm = m[1].match(/\bname="([^"]*)"/);
+      const rid = m[1].match(/\b(?:\w+:)?id="([^"]*)"/);
+      const entry = (rid && relMap.get(rid[1])) || `xl/worksheets/sheet${sheetDefs.length + 1}.xml`;
+      sheetDefs.push({ name: nm ? xmlUnesc(nm[1]) : `Sheet${sheetDefs.length + 1}`, entry });
+    }
+  }
+  if (!sheetDefs.length) {
+    zip.names.filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(n)).sort().forEach((n, i) => sheetDefs.push({ name: `Sheet${i + 1}`, entry: n }));
+  }
+  const colIdxOf = (ref) => {
+    const m = String(ref || '').match(/^[A-Za-z]+/);
+    if (!m) return -1;
+    let n = 0;
+    for (const ch of m[0].toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n - 1;
+  };
+  const MAX_ROWS = 500, MAX_COLS = 80;
+  const sheets = [];
+  for (const sd of sheetDefs) {
+    const xml = zip.getText(sd.entry);
+    if (!xml) continue;
+    const rows = [];
+    let totalRows = 0, maxCol = 0;
+    const dimM = xml.match(/<(?:\w+:)?dimension\b[^>]*\bref="[A-Za-z]+\d+:([A-Za-z]+)(\d+)"/);
+    const dimTotal = dimM ? Number(dimM[2]) || 0 : 0;
+    const rowRe = /<(?:\w+:)?row\b[^>]*>([\s\S]*?)<\/(?:\w+:)?row>/g;
+    let rm;
+    while ((rm = rowRe.exec(xml)) !== null) {
+      totalRows++;
+      if (rows.length >= MAX_ROWS) {
+        if (dimTotal >= totalRows) { totalRows = dimTotal; break; } // 超大表直接取 dimension 总行数，免扫十几万尾行
+        continue;
+      }
+      const rowArr = [];
+      let nextCol = 0;
+      const cellRe = /<(?:\w+:)?c\b([^>]*)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?c>)/g;
+      let cm;
+      while ((cm = cellRe.exec(rm[1])) !== null) {
+        const attrs = cm[1] || '', inner = cm[2] || '';
+        const rM = attrs.match(/\br="([A-Za-z]+\d+)"/);
+        const cIdx = rM ? colIdxOf(rM[1]) : nextCol;
+        nextCol = cIdx + 1;
+        if (cIdx < 0 || cIdx >= MAX_COLS) continue;
+        const tM = attrs.match(/\bt="([^"]*)"/);
+        const sM = attrs.match(/\bs="(\d+)"/);
+        const tp = tM ? tM[1] : '';
+        let val = '';
+        if (tp === 'inlineStr') {
+          const tRe = /<(?:\w+:)?t(?:\s[^>]*)?>([\s\S]*?)<\/(?:\w+:)?t>/g;
+          let tm; while ((tm = tRe.exec(inner)) !== null) val += xmlUnesc(tm[1]);
+        } else {
+          const vM = inner.match(/<(?:\w+:)?v(?:\s[^>]*)?>([\s\S]*?)<\/(?:\w+:)?v>/);
+          const rawV = vM ? xmlUnesc(vM[1]) : '';
+          if (tp === 's') val = shared[Number(rawV)] ?? rawV;
+          else if (tp === 'b') val = rawV === '1' ? 'TRUE' : 'FALSE';
+          else if (!tp && rawV !== '' && sM && dateStyleIdx.has(Number(sM[1]))) val = fmtExcelDate(Number(rawV));
+          else if ((!tp || tp === 'n') && rawV !== '' && /^[-+]?\d+\.\d{7,}$/.test(rawV)) val = String(Number(Number(rawV).toPrecision(12)));
+          else val = rawV;
+        }
+        while (rowArr.length <= cIdx) rowArr.push('');
+        rowArr[cIdx] = val;
+        if (val !== '' && cIdx + 1 > maxCol) maxCol = cIdx + 1;
+      }
+      rows.push(rowArr);
+    }
+    const cols = Math.min(MAX_COLS, Math.max(maxCol, 1));
+    const normRows = rows.filter((r) => r.some((c) => c !== '')).map((r) => {
+      const out = r.slice(0, cols);
+      while (out.length < cols) out.push('');
+      return out;
+    });
+    sheets.push({ name: sd.name, rows: normRows, totalRows, truncated: totalRows > MAX_ROWS });
+  }
+  return sheets;
+}
+
+function scanTopXmlBlocks(xml, tags) {
+  const out = [];
+  const tagAlt = tags.map((t) => t.replace(':', '\\:')).join('|');
+  const tokRe = new RegExp(`<(/?)(?:${tagAlt})(?=[\\s>/])([^>]*)>`, 'g');
+  let depth = 0, curTag = '', startIdx = 0, m;
+  while ((m = tokRe.exec(xml)) !== null) {
+    const closing = m[1] === '/';
+    const selfClose = !closing && m[2].endsWith('/');
+    const matchedTag = m[0].slice(closing ? 2 : 1).split(/[\s>/]/)[0];
+    if (!closing && !selfClose) {
+      if (depth === 0) { curTag = matchedTag; startIdx = m.index; }
+      if (matchedTag === curTag) depth++;
+    } else if (closing && depth > 0 && matchedTag === curTag) {
+      depth--;
+      if (depth === 0) out.push({ tag: curTag, raw: xml.slice(startIdx, tokRe.lastIndex) });
+    }
+  }
+  return out;
+}
+
+function mediaMimeOf(name) {
+  const e = ext(name);
+  return { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp' }[e] || '';
+}
+
+function parseDocxBuffer(buf) {
+  const zip = readOoxmlZip(buf);
+  const docXml = zip.getText('word/document.xml');
+  if (!docXml) return '';
+  const rels = new Map();
+  const relXml = zip.getText('word/_rels/document.xml.rels');
+  let imgBudget = 16 * 1024 * 1024;
+  if (relXml) {
+    const rRe = /<Relationship\b([^>]*)\/?>/g;
+    let m;
+    while ((m = rRe.exec(relXml)) !== null) {
+      const idM = m[1].match(/\bId="([^"]+)"/), tgM = m[1].match(/\bTarget="([^"]+)"/), mdM = m[1].match(/\bTargetMode="([^"]+)"/);
+      if (!idM || !tgM) continue;
+      if (mdM && mdM[1] === 'External') { rels.set(idM[1], { external: true, url: xmlUnesc(tgM[1]) }); continue; }
+      let tg = tgM[1].replace(/^\/+/, '');
+      if (!tg.startsWith('word/')) tg = 'word/' + tg.replace(/^\.\//, '');
+      const mime = mediaMimeOf(tg);
+      if (mime && imgBudget > 0) {
+        const b = zip.getBuf(tg);
+        if (b && b.length <= 4 * 1024 * 1024 && b.length <= imgBudget) {
+          imgBudget -= b.length;
+          rels.set(idM[1], { dataUri: `data:${mime};base64,${b.toString('base64')}` });
+        }
+      }
+    }
+  }
+  const renderRuns = (pXml) => {
+    let html = '';
+    const tokenRe = /<w:hyperlink\b([^>]*)>([\s\S]*?)<\/w:hyperlink>|<w:r\b[^>]*>([\s\S]*?)<\/w:r>/g;
+    const renderOneRun = (rInner) => {
+      let chunk = '';
+      const blip = rInner.match(/<a:blip\b[^>]*\br:embed="([^"]+)"/);
+      if (blip && rels.get(blip[1]) && rels.get(blip[1]).dataUri) {
+        chunk += `<img src="${rels.get(blip[1]).dataUri}" alt="">`;
+      }
+      const partRe = /<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>|<w:br\b[^>]*\/?>|<w:tab\b[^>]*\/?>/g;
+      let pm;
+      while ((pm = partRe.exec(rInner)) !== null) {
+        if (pm[0].startsWith('<w:br')) chunk += '<br>';
+        else if (pm[0].startsWith('<w:tab')) chunk += '&emsp;';
+        else chunk += htmlEsc(xmlUnesc(pm[1])).replace(/\n/g, '<br>');
+      }
+      if (!chunk) return '';
+      const rPr = (rInner.match(/<w:rPr\b[^>]*>([\s\S]*?)<\/w:rPr>/) || [])[1] || '';
+      if (/<w:b(?:\s|\/|>)/.test(rPr) && !/<w:b\s+w:val="(?:0|false)"/.test(rPr)) chunk = `<strong>${chunk}</strong>`;
+      if (/<w:i(?:\s|\/|>)/.test(rPr) && !/<w:i\s+w:val="(?:0|false)"/.test(rPr)) chunk = `<em>${chunk}</em>`;
+      if (/<w:u(?:\s|\/|>)/.test(rPr) && !/<w:u\s+w:val="none"/.test(rPr)) chunk = `<u>${chunk}</u>`;
+      return chunk;
+    };
+    let m;
+    while ((m = tokenRe.exec(pXml)) !== null) {
+      if (m[2] !== undefined) {
+        const ridM = (m[1] || '').match(/\br:id="([^"]+)"/);
+        const rel = ridM && rels.get(ridM[1]);
+        let innerHtml = '';
+        const rr = /<w:r\b[^>]*>([\s\S]*?)<\/w:r>/g;
+        let rm; while ((rm = rr.exec(m[2])) !== null) innerHtml += renderOneRun(rm[1]);
+        if (rel && rel.external && /^https?:\/\//i.test(rel.url)) html += `<a href="${htmlEsc(rel.url)}" target="_blank" rel="noreferrer">${innerHtml || htmlEsc(rel.url)}</a>`;
+        else html += innerHtml;
+      } else {
+        html += renderOneRun(m[3] || '');
+      }
+    }
+    return html;
+  };
+  const renderParagraph = (pRaw) => {
+    const pPr = (pRaw.match(/<w:pPr\b[^>]*>([\s\S]*?)<\/w:pPr>/) || [])[1] || '';
+    const stM = pPr.match(/<w:pStyle\b[^>]*\bw:val="([^"]+)"/);
+    const stVal = stM ? stM[1] : '';
+    const isList = /<w:numPr\b/.test(pPr);
+    const inner = renderRuns(pRaw);
+    if (!inner.trim()) return '';
+    if (/^(?:Title|标题)$/i.test(stVal)) return `<h1>${inner}</h1>`;
+    const hm = stVal.match(/^(?:Heading|标题\s*)([1-6])$/i) || (/^[1-6]$/.test(stVal) ? [null, stVal] : null);
+    if (hm) return `<h${hm[1]}>${inner}</h${hm[1]}>`;
+    if (isList) return `<p class="office-li">• ${inner}</p>`;
+    return `<p>${inner}</p>`;
+  };
+  const renderTable = (tblRaw) => {
+    const innerXml = tblRaw.replace(/^<w:tbl\b[^>]*>|<\/w:tbl>$/g, '');
+    const trBlocks = scanTopXmlBlocks(innerXml, ['w:tr']);
+    if (!trBlocks.length) return '';
+    let h = '<div class="csv-wrap"><table class="csv-table">';
+    trBlocks.forEach((tr, rIdx) => {
+      const tcBlocks = scanTopXmlBlocks(tr.raw.replace(/^<w:tr\b[^>]*>|<\/w:tr>$/g, ''), ['w:tc']);
+      h += '<tr>';
+      const cellTag = rIdx === 0 ? 'th' : 'td';
+      tcBlocks.forEach((tc) => {
+        const spanM = tc.raw.match(/<w:gridSpan\b[^>]*\bw:val="(\d+)"/);
+        const spanAttr = spanM && Number(spanM[1]) > 1 ? ` colspan="${Number(spanM[1])}"` : '';
+        const pBlocks = scanTopXmlBlocks(tc.raw.replace(/^<w:tc\b[^>]*>|<\/w:tc>$/g, ''), ['w:p', 'w:tbl']);
+        const cellHtml = pBlocks.map((b) => (b.tag === 'w:tbl' ? renderTable(b.raw) : renderRuns(b.raw))).filter(Boolean).join('<br>');
+        h += `<${cellTag}${spanAttr}>${cellHtml}</${cellTag}>`;
+      });
+      h += '</tr>';
+    });
+    return h + '</table></div>';
+  };
+  const bodyXml = (docXml.match(/<w:body\b[^>]*>([\s\S]*?)<\/w:body>/) || [])[1] || docXml;
+  const blocks = scanTopXmlBlocks(bodyXml, ['w:p', 'w:tbl']);
+  return blocks.map((b) => (b.tag === 'w:tbl' ? renderTable(b.raw) : renderParagraph(b.raw))).filter(Boolean).join('\n');
+}
+
+function parsePptxSlidesBuffer(buf) {
+  const zip = readOoxmlZip(buf);
+  const slideEntries = zip.names.filter((n) => /^ppt\/slides\/slide\d+\.xml$/i.test(n))
+    .sort((a, b) => Number(a.match(/(\d+)\.xml$/)[1]) - Number(b.match(/(\d+)\.xml$/)[1]));
+  let imgBudget = 16 * 1024 * 1024;
+  return slideEntries.map((entry, idx) => {
+    const xml = zip.getText(entry);
+    const sName = path.basename(entry);
+    const relXml = zip.getText(`ppt/slides/_rels/${sName}.rels`);
+    const imgMap = new Map();
+    if (relXml) {
+      const rRe = /<Relationship\b([^>]*)\/?>/g;
+      let m;
+      while ((m = rRe.exec(relXml)) !== null) {
+        const idM = m[1].match(/\bId="([^"]+)"/), tgM = m[1].match(/\bTarget="([^"]+)"/);
+        if (!idM || !tgM) continue;
+        const resolved = path.posix.normalize(path.posix.join('ppt/slides', tgM[1]));
+        const mime = mediaMimeOf(resolved);
+        if (mime && imgBudget > 0) {
+          const b = zip.getBuf(resolved);
+          if (b && b.length <= 4 * 1024 * 1024 && b.length <= imgBudget) {
+            imgBudget -= b.length;
+            imgMap.set(idM[1], `data:${mime};base64,${b.toString('base64')}`);
+          }
+        }
+      }
+    }
+    const paras = [];
+    const pRe = /<a:p\b[^>]*>([\s\S]*?)<\/a:p>/g;
+    let pm;
+    while ((pm = pRe.exec(xml)) !== null) {
+      let line = '';
+      const tRe = /<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g;
+      let tm; while ((tm = tRe.exec(pm[1])) !== null) line += xmlUnesc(tm[1]);
+      if (line.trim()) paras.push(line.trim());
+    }
+    const images = [];
+    const bRe = /<a:blip\b[^>]*\br:embed="([^"]+)"/g;
+    let bm;
+    while ((bm = bRe.exec(xml)) !== null) {
+      const uri = imgMap.get(bm[1]);
+      if (uri && !images.includes(uri)) images.push(uri);
+    }
+    return { index: idx + 1, paras, images };
+  });
+}
+
+async function findSofficeBin() {
+  for (const cand of ['/opt/homebrew/bin/soffice', '/usr/local/bin/soffice', '/Applications/LibreOffice.app/Contents/MacOS/soffice']) {
+    try { await fsp.access(cand, fs.constants.X_OK); return cand; } catch { /* */ }
+  }
+  return '';
+}
+
+async function convertPptToPdfCached(file, st) {
+  const soffice = await findSofficeBin();
+  if (!soffice) return null;
+  await fsp.mkdir(THUMB_DIR, { recursive: true });
+  const key = crypto.createHash('sha1').update(`${file}:${st.size}:${st.mtimeMs}`).digest('hex').slice(0, 20);
+  const dstPdf = path.join(THUMB_DIR, `office-${key}.pdf`);
+  try { if ((await fsp.stat(dstPdf)).size > 0) return dstPdf; } catch { /* 未缓存 */ }
+  if (officePdfInflight.has(key)) return officePdfInflight.get(key);
+  const job = (async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'fanbox-lo-'));
+    const profDir = path.join(tmpDir, 'profile');
+    try {
+      await new Promise((resolve, reject) => {
+        execFile(soffice, [`-env:UserInstallation=file://${profDir}`, '--headless', '--convert-to', 'pdf', '--outdir', tmpDir, file],
+          { timeout: 30000 }, (err) => (err ? reject(err) : resolve()));
+      });
+      const outFiles = (await fsp.readdir(tmpDir)).filter((n) => n.toLowerCase().endsWith('.pdf'));
+      if (!outFiles.length) return null;
+      await fsp.copyFile(path.join(tmpDir, outFiles[0]), dstPdf);
+      return dstPdf;
+    } catch { return null; }
+    finally { fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); officePdfInflight.delete(key); }
+  })();
+  officePdfInflight.set(key, job);
+  return job;
+}
+
+async function officePreview(p) {
+  const file = resolvePath(p);
+  let st;
+  try { st = await fsp.stat(file); } catch { return { ok: false, error: '文件不存在' }; }
+  const e = ext(file);
+  if (st.size > 60 * 1024 * 1024) return { ok: false, error: '文件超过 60MB，请点击右上角「打开」使用桌面软件查看' };
+  try {
+    if (e === 'xlsx') {
+      const sheets = parseXlsxBuffer(await fsp.readFile(file));
+      return { ok: true, sub: 'sheet', ext: e, size: st.size, mtime: st.mtimeMs, sheets };
+    }
+    if (e === 'xls') {
+      const py = `import sys,json,xlrd\nwb=xlrd.open_workbook(sys.argv[1])\nout=[]\nfor s in wb.sheets():\n  rows=[[str(s.cell_value(r,c)) for c in range(min(s.ncols,80))] for r in range(min(s.nrows,500))]\n  out.append({"name":s.name,"rows":rows,"totalRows":s.nrows,"truncated":s.nrows>500})\nprint(json.dumps(out))`;
+      const sheets = await new Promise((resolve, reject) => {
+        execFile('/usr/bin/python3', ['-I', '-c', py, file], { timeout: 10000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+          if (err) return reject(new Error('老版 .xls 需要 python3 xlrd 或用桌面 Excel 打开'));
+          try { resolve(JSON.parse(stdout)); } catch (ex) { reject(ex); }
+        });
+      });
+      return { ok: true, sub: 'sheet', ext: e, size: st.size, mtime: st.mtimeMs, sheets };
+    }
+    if (e === 'docx' || e === 'doc') {
+      let html = '';
+      if (e === 'docx') {
+        try { html = parseDocxBuffer(await fsp.readFile(file)); } catch { html = ''; }
+      }
+      if (!html && PLATFORM === 'darwin') {
+        const rawHtml = await new Promise((resolve, reject) => {
+          execFile('/usr/bin/textutil', ['-convert', 'html', '-stdout', file], { timeout: 10000, maxBuffer: 16 * 1024 * 1024 }, (err, out) => (err ? reject(err) : resolve(String(out || ''))));
+        });
+        const bodyM = rawHtml.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+        html = (bodyM ? bodyM[1] : rawHtml).replace(/\bcolor:\s*#000(?:000)?\b;?/gi, '').replace(/\bbackground(?:-color)?:\s*#fff(?:fff)?\b;?/gi, '');
+      }
+      if (!html) return { ok: false, error: '无法解析该 Word 文档' };
+      return { ok: true, sub: 'doc', ext: e, size: st.size, mtime: st.mtimeMs, html };
+    }
+    if (e === 'pptx' || e === 'ppt') {
+      const pdfPath = await convertPptToPdfCached(file, st);
+      if (pdfPath) {
+        return { ok: true, sub: 'pdf', ext: e, size: st.size, mtime: st.mtimeMs, pdfUrl: `/api/raw?path=${encodeURIComponent(pdfPath)}&v=${st.mtimeMs}` };
+      }
+      if (e === 'pptx') {
+        const slides = parsePptxSlidesBuffer(await fsp.readFile(file));
+        return { ok: true, sub: 'slides', ext: e, size: st.size, mtime: st.mtimeMs, slides };
+      }
+      return { ok: false, error: '老版 .ppt 预览需安装 LibreOffice，或点击右上角「打开」查看' };
+    }
+    return { ok: false, error: '不支持的 Office 格式' };
+  } catch (err) {
+    return { ok: false, error: '解析失败：' + (err.message || String(err)) };
+  }
+}
+
 // 移动文件到目标目录（截图直通车「收进素材」等用）：同卷 rename，跨卷回退拷贝；同名自动加序号防覆盖
 async function movePath(src, dstDir) {
   const s = resolvePath(src), d = resolvePath(dstDir);
@@ -1241,17 +1885,19 @@ const SNAP_EXCLUDE = [
 ].join('\n') + '\n';
 const snapThrottle = new Map(); // project → 上次尝试 ms（15s 内不重复扫）
 const snapDead = new Set();     // 本次运行内放弃的目录（太大/超时），别每轮都撞一次
+let snapUsageCache = null;      // { at, data }：du 一遍二十几 GB 要好几秒，60 秒内复用
 // 符号链接归一化：/tmp → /private/tmp 这类别名会让 cwd 和 HOME 字符串对不上、绕过资格守卫
 const snapReal = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
 
 function snapGitDir(project) {
   return path.join(SNAP_ROOT, crypto.createHash('sha1').update(project).digest('hex').slice(0, 16));
 }
+// project 传 null = 只碰裸仓库不挂工作区（项目目录可能已经不在了，cwd 落到快照根目录）
 function execSnap(gitDir, project, args, timeout = 10000) {
   return new Promise((resolve) => {
-    execFile('git', ['--git-dir', gitDir, '--work-tree', project, ...args],
-      { cwd: project, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-        resolve({ ok: !err, killed: !!(err && err.killed), stdout: stdout || '', stderr: stderr || '' });
+    execFile('git', ['--git-dir', gitDir, ...(project ? ['--work-tree', project] : []), ...args],
+      { cwd: project || SNAP_ROOT, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+        resolve({ ok: !err, killed: !!(err && err.killed), code: err ? err.code : 0, stdout: stdout || '', stderr: stderr || '' });
       });
   });
 }
@@ -1273,8 +1919,28 @@ function snapEligible(project) {
   } else if (p.split(path.sep).filter(Boolean).length < 2) return false; // / 下一层（/tmp 等）不收
   try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
+// 零 tag 且零 commit 的影子仓库里没有任何可恢复内容，只剩失败的 commit 留下的孤立 blob
+// （2026-08-29 实测 10 个这种仓库堆了 8.3GB）。整目录删掉——这是翻箱自己的缓存，不是用户文件。
+// 判死活看 tag 不看 rev-list：快照全挂在 refs/tags/s* 下，健康仓库的 rev-list --all 也可能是 0
+async function snapReapIfEmpty(gitDir) {
+  if (!fs.existsSync(path.join(gitDir, 'HEAD'))) return false;
+  const tags = await execSnap(gitDir, null, ['tag', '-l', 's*']);
+  if (!tags.ok || tags.stdout.trim()) return false;
+  const head = await execSnap(gitDir, null, ['rev-parse', '--verify', '-q', 'HEAD']);
+  if (head.ok) return false;
+  await fsp.rm(gitDir, { recursive: true, force: true });
+  snapUsageCache = null;
+  console.log('  🧹  清掉没有任何快照的影子仓库：' + path.basename(gitDir));
+  return true;
+}
+async function snapReapAll() {
+  let names = [];
+  try { names = await fsp.readdir(SNAP_ROOT); } catch { return; }
+  for (const n of names) if (/^[0-9a-f]{16}$/.test(n)) await snapReapIfEmpty(path.join(SNAP_ROOT, n));
+}
 async function snapEnsureRepo(project) {
   const gitDir = snapGitDir(project);
+  await snapReapIfEmpty(gitDir); // 上次 commit 失败留下的空壳先清掉，重新 init 一个干净的
   if (!fs.existsSync(path.join(gitDir, 'HEAD'))) {
     await fsp.mkdir(gitDir, { recursive: true }).catch(() => {}); // git init 不建父目录
     const r = await execSnap(gitDir, project, ['init', '-q']);
@@ -1304,20 +1970,90 @@ async function snapshot(project, label) {
     if (add.killed) snapDead.add(project); // 超时 = 太大，别再试
     return { ok: false, skipped: add.killed ? 'too-big' : 'add-failed' };
   }
+  // 「无变化」看索引与 HEAD 的差异（退出码 0 = 无变化，1 = 有变化，其余 = 出错；HEAD 未诞生时也成立），
+  // 不再拿 commit 失败当依据：从前 commit 超时被当成「无变化」返回 ok，已 add 的 blob 永久留在仓库里
+  // 每轮开工再堆一批，回滚还把这个假 ok 当「已备份」直接 reset --hard——那一轮丢的是真工作区
+  const diff = await execSnap(gitDir, project, ['diff', '--cached', '--quiet'], 25000);
+  if (diff.ok) return { ok: true, skipped: 'no-change' };
+  if (diff.code !== 1) {
+    if (diff.killed) snapDead.add(project);
+    return { ok: false, skipped: 'diff-failed' };
+  }
   const msg = String(label || '回合存档').slice(0, 120);
   const ci = await execSnap(gitDir, project, [
     '-c', 'user.name=FanBox', '-c', 'user.email=snapshot@fanbox.local', '-c', 'commit.gpgsign=false',
     'commit', '-q', '--no-verify', '-m', msg,
   ], 20000);
-  if (!ci.ok) return { ok: true, skipped: 'no-change' }; // 与上个快照无差异
-  await execSnap(gitDir, project, ['tag', `s${Date.now()}`]);
+  if (!ci.ok) {
+    // 真失败：索引退回上个快照，再把这轮刚写进 objects/ 的孤立对象清掉（reset 只动索引，对象还在）
+    await execSnap(gitDir, project, ['reset', '-q'], 25000);
+    await execSnap(gitDir, project, ['prune', '--expire=now'], 60000);
+    if (ci.killed) snapDead.add(project);
+    return { ok: false, skipped: 'commit-failed' };
+  }
+  const tag = `s${Date.now()}`;
+  const tg = await execSnap(gitDir, project, ['tag', tag]);
+  if (!tg.ok) return { ok: false, skipped: 'tag-failed' }; // 列表只认 tag，没打上等于没存
   // tag 滚动裁剪：超出 SNAP_KEEP 删最旧，gc 交给 git 自己看着办
   const tags = (await execSnap(gitDir, project, ['tag', '-l', 's*'])).stdout.split('\n').filter(Boolean).sort();
   if (tags.length > SNAP_KEEP) {
     await execSnap(gitDir, project, ['tag', '-d', ...tags.slice(0, tags.length - SNAP_KEEP)]);
     execSnap(gitDir, project, ['gc', '--auto', '-q'], 60000); // 不 await，后台随缘
   }
-  return { ok: true, created: true };
+  snapUsageCache = null;
+  return { ok: true, created: true, tag };
+}
+// 占用透视：每个影子仓库多大、几个快照、是否已失效（零 tag = 没有任何可恢复内容）
+async function snapUsage() {
+  if (snapUsageCache && Date.now() - snapUsageCache.at < 60000) return snapUsageCache.data;
+  let idx = {};
+  try { idx = JSON.parse(await fsp.readFile(SNAP_INDEX, 'utf8')); } catch { /* 没索引也能算大小 */ }
+  let names = [];
+  try { names = (await fsp.readdir(SNAP_ROOT)).filter((n) => /^[0-9a-f]{16}$/.test(n)); } catch { /* 还没存过档 */ }
+  const sizes = {};
+  if (names.length) {
+    const out = await new Promise((resolve) => {
+      execFile('du', ['-sk', ...names.map((n) => path.join(SNAP_ROOT, n))], { timeout: 120000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(stdout || ''));
+    });
+    for (const line of out.split('\n')) {
+      const m = line.match(/^(\d+)\s+(.+)$/);
+      if (m) sizes[path.basename(m[2])] = Number(m[1]) * 1024;
+    }
+  }
+  const repos = [];
+  for (const dir of names) {
+    const tags = (await execSnap(path.join(SNAP_ROOT, dir), null, ['tag', '-l', 's*'])).stdout.split('\n').filter(Boolean);
+    const lastAt = tags.reduce((a, t) => Math.max(a, Number(t.slice(1)) || 0), 0) || null; // tag 名就是打快照的毫秒时间戳
+    repos.push({ project: idx[dir] || null, dir, bytes: sizes[dir] || 0, tags: tags.length, dead: tags.length === 0, lastAt });
+  }
+  repos.sort((a, b) => b.bytes - a.bytes);
+  const data = { ok: true, total: repos.reduce((a, r) => a + r.bytes, 0), repos };
+  snapUsageCache = { at: Date.now(), data };
+  return data;
+}
+// 清理：删某个项目的整个影子仓库，或删全部失效仓库。返回释放的字节数
+async function snapClean({ project, dead }) {
+  snapUsageCache = null; // 释放多少要按此刻的真实大小算
+  const usage = await snapUsage();
+  let targets;
+  if (dead) targets = usage.repos.filter((r) => r.dead);
+  else if (project) {
+    const norm = snapReal(path.normalize(resolvePath(project)).replace(/\/+$/, ''));
+    targets = usage.repos.filter((r) => r.project === norm);
+    if (!targets.length) return { ok: false, error: '这个目录还没有存档' };
+  } else return { ok: false, error: '缺少参数' };
+  let freed = 0;
+  let idx = {};
+  try { idx = JSON.parse(await fsp.readFile(SNAP_INDEX, 'utf8')); } catch { /* */ }
+  for (const r of targets) {
+    await fsp.rm(path.join(SNAP_ROOT, r.dir), { recursive: true, force: true });
+    freed += r.bytes;
+    delete idx[r.dir];
+    if (r.project) { snapDead.delete(r.project); snapThrottle.delete(r.project); }
+  }
+  if (targets.length) await fsp.writeFile(SNAP_INDEX, JSON.stringify(idx, null, 2)).catch(() => {});
+  snapUsageCache = null;
+  return { ok: true, removed: targets.length, freed };
 }
 // 列出某目录的快照：精确命中或该目录在某个已存档项目内（取最长前缀）
 async function snapResolveProject(p) {
@@ -1355,8 +2091,13 @@ async function snapRestore(p, hash) {
   const has = await execSnap(gitDir, project, ['cat-file', '-e', `${hash}^{commit}`]);
   if (!has.ok) return { ok: false, error: '找不到这个快照' };
   snapThrottle.delete(project); // 安全存档绝不能被节流吞掉：没备份就 reset 等于毁数据
-  const backup = await snapshot(project, '回滚前自动存档'); // 无变化时静默跳过，正合适
-  if (!backup.ok) return { ok: false, error: '当前状态存档失败，为安全起见不执行恢复' };
+  const backup = await snapshot(project, '回滚前自动存档');
+  // 硬门：只有「这次真的存下了」或「工作区与最新快照完全一致」才允许 reset --hard。
+  // 别信 ok 字段——从前 commit 超时也返回 ok，回滚拿它当「已备份」，抹掉的是用户没存过的活
+  if (!backup.created) {
+    const st = await execSnap(gitDir, project, ['status', '--porcelain'], 25000);
+    if (!st.ok || st.stdout.trim()) return { ok: false, error: '存档失败，未回滚' };
+  }
   const r = await execSnap(gitDir, project, ['reset', '--hard', hash, '-q'], 60000);
   snapThrottle.delete(project); // 回滚后下一轮 agent 开工要能立刻存档
   if (!r.ok) return { ok: false, error: '恢复失败：' + (r.stderr || '').slice(0, 200) };
@@ -1517,13 +2258,21 @@ async function pruneThumbs(maxBytes = 400 * 1024 * 1024) {
     const stats = (await Promise.all(files.map(async (f) => {
       if (f.startsWith('_ql_')) return null;
       const fp = path.join(THUMB_DIR, f);
-      try { const s = await fsp.stat(fp); return s.isFile() ? { fp, size: s.size, t: s.mtimeMs } : null; } catch { return null; }
+      // 按实际占用的块算而不是文件长度：几千个小 png 每个都有半块的零头，du 看到的比 size 之和多十几 MB
+      try { const s = await fsp.stat(fp); return s.isFile() ? { fp, size: s.blocks ? s.blocks * 512 : s.size, t: s.mtimeMs } : null; } catch { return null; }
     }))).filter(Boolean);
     let total = stats.reduce((a, b) => a + b.size, 0);
     if (total <= maxBytes) return;
     stats.sort((a, b) => a.t - b.t); // 最旧的先删
     for (const f of stats) { if (total <= maxBytes) break; await fsp.unlink(f.fp).catch(() => {}); total -= f.size; }
   } catch { /* 目录不存在等，忽略 */ }
+}
+// 生成过新缩略图就排一次裁剪：从前只在启动时裁，一个会话里翻几千张图缓存就越过上限几十 MB
+// （实测 461MB > 400MB）。合批成 5 秒一次，别让上百个并发 miss 各自 readdir 一遍几千个文件
+let pruneTimer = null;
+function pruneThumbsSoon() {
+  if (pruneTimer) return;
+  pruneTimer = setTimeout(() => { pruneTimer = null; pruneThumbs().catch(() => {}); }, 5000);
 }
 
 // 排版档把图片转 base64 时用：渲染进程受同源策略限制，抓不到图床里的外链图，
@@ -1610,7 +2359,9 @@ async function proxyImage(res, url) {
   }
 }
 
-async function serveThumb(req, res, p, size) {
+// ver：调用方带的内容版本号（文件 mtime）。带了 = 这个 URL 的内容永不再变，发长缓存；
+// 没带 = 发协商缓存，靠 ETag 走 304，改过的图立刻能看见新的（md 里引用的图拿不到 mtime，走这条）
+async function serveThumb(req, res, p, size, ver) {
   let src;
   try { src = resolvePath(p); } catch { res.writeHead(400); res.end('bad path'); return; }
   let st;
@@ -1622,8 +2373,16 @@ async function serveThumb(req, res, p, size) {
   const jpegOut = isImg && !ALPHA_IMG_EXT.has(e);
   const cacheFile = path.join(THUMB_DIR, key + (jpegOut ? '.jpg' : '.png'));
   const type = jpegOut ? 'image/jpeg' : 'image/png';
+  // key 已经把「源文件路径 + mtime + 目标宽度」全揉进去了，拿它当 ETag 天然精确
+  const etag = '"' + key + '"';
+  const cacheCtl = ver ? 'max-age=604800' : 'no-cache';
+  if (req.headers['if-none-match'] === etag) { // 内容没变，不回体（本机 304 约 1ms）
+    res.writeHead(304, { ETag: etag, 'Cache-Control': cacheCtl });
+    res.end();
+    return;
+  }
   const sendCache = () => {
-    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'max-age=604800' });
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': cacheCtl, ETag: etag });
     const rs = fs.createReadStream(cacheFile);
     rs.on('error', () => { try { res.destroy(); } catch { /* */ } }); // 读缓存中途出错别让未捕获 error 打挂进程
     rs.pipe(res);
@@ -1631,7 +2390,7 @@ async function serveThumb(req, res, p, size) {
   if (fs.existsSync(cacheFile)) return sendCache();
   let pr = thumbInflight.get(cacheFile);
   if (!pr) { pr = generateThumb(src, e, s, cacheFile, isImg).finally(() => thumbInflight.delete(cacheFile)); thumbInflight.set(cacheFile, pr); }
-  try { await pr; sendCache(); }
+  try { await pr; sendCache(); pruneThumbsSoon(); }
   catch { res.writeHead(415); res.end('no thumb'); } // 前端 onerror 回退矢量图标
 }
 
@@ -1654,7 +2413,7 @@ async function serveHeicAsJpeg(req, res, file, st) {
       .finally(() => thumbInflight.delete(cacheFile));
     thumbInflight.set(cacheFile, pr);
   }
-  try { await pr; pruneThumbs(); send(); }
+  try { await pr; pruneThumbsSoon(); send(); }
   catch { res.writeHead(415); res.end('heic transcode failed'); } // 前端 onerror 回退矢量图标
 }
 
@@ -2019,37 +2778,55 @@ async function sessionFileCwd(fp) {
   return cwd;
 }
 
+// ==== 二开: cockpit —— 项目目录有效性护栏 ====
+// 家目录裸跑与系统临时目录（自动化评测/无头网关落点）不算真实项目，避免白占 20 个名额
+function isValidProjectCwd(cwd) {
+  if (!cwd || cwd === HOME) return false;
+  if (/^\/(private\/)?(tmp|var\/folders)(\/|$)/.test(cwd)) return false;
+  return true;
+}
+
 async function agentProjects(force = false) {
   if (!force && agentProjCache.data && Date.now() - agentProjCache.at < 60000) return agentProjCache.data;
   const cutoff = Date.now() - 30 * 86400000;
   const map = new Map(); // cwd -> { lastActive, agents: Set }
   const add = (cwd, t, agent) => {
-    if (!cwd || cwd === HOME) return; // 在家目录裸跑的会话不算「项目」
+    if (!isValidProjectCwd(cwd)) return;
     const cur = map.get(cwd) || { lastActive: 0, agents: new Set() };
     cur.lastActive = Math.max(cur.lastActive, t);
     cur.agents.add(agent);
     map.set(cwd, cur);
   };
-  // ==== 二开: cockpit ==== 只收 Claude 项目（侧栏只服务 Claude 会话，Codex 项目白占名额）；
-  // 每个会话文件各自按头部 cwd 归属——同一个目录可能混着多个项目，见 sessionFileCwd
-  try {
-    const dirs = await fsp.readdir(CLAUDE_PROJ);
-    await Promise.all(dirs.map(async (d) => {
-      const base = path.join(CLAUDE_PROJ, d);
-      let names; try { names = await fsp.readdir(base); } catch { return; }
-      // 文件头读不到 cwd（前 64KB 没 cwd 行）时从目录名反解兜底，每目录最多算一次，
-      // 避免 work 这种「头部全是 thinking/tool_use」的项目整条丢失
-      let guess;
-      await Promise.all(names.filter((n) => n.endsWith('.jsonl')).map(async (n) => {
-        try {
-          const fp = path.join(base, n);
-          const { mtimeMs } = await fsp.stat(fp);
-          if (mtimeMs < cutoff) return;
-          add((await sessionFileCwd(fp)) || (await (guess = guess || cwdFromDirName(d))), mtimeMs, 'claude');
-        } catch { /* */ }
-      }));
-    }));
-  } catch { /* 没用过 Claude Code */ }
+  // ==== 二开: cockpit ==== 收驾驶舱双引擎项目（Claude Code + Antigravity），Codex 项目不进侧栏；
+  // Claude 会话逐文件按头部 cwd 归属（防汉字名目录撞车），Antigravity 从索引库 workspace_uris 归属
+  await Promise.all([
+    (async () => {
+      try {
+        const dirs = await fsp.readdir(CLAUDE_PROJ);
+        await Promise.all(dirs.map(async (d) => {
+          const base = path.join(CLAUDE_PROJ, d);
+          let names; try { names = await fsp.readdir(base); } catch { return; }
+          // 文件头读不到 cwd（前 64KB 没 cwd 行）时从目录名反解兜底，每目录最多算一次，
+          // 避免 work 这种「头部全是 thinking/tool_use」的项目整条丢失
+          let guess;
+          await Promise.all(names.filter((n) => n.endsWith('.jsonl')).map(async (n) => {
+            try {
+              const fp = path.join(base, n);
+              const { mtimeMs } = await fsp.stat(fp);
+              if (mtimeMs < cutoff) return;
+              add((await sessionFileCwd(fp)) || (await (guess = guess || cwdFromDirName(d))), mtimeMs, 'claude');
+            } catch { /* */ }
+          }));
+        }));
+      } catch { /* 没用过 Claude Code */ }
+    })(),
+    (async () => {
+      const agyRows = await listAgySummaries();
+      for (const r of agyRows) {
+        if (r.lastT >= cutoff) add(r.cwd, r.lastT, 'agy');
+      }
+    })(),
+  ]);
   // 按最近活跃排序，已被删除的项目目录剔掉
   const sorted = [...map.entries()].sort((a, b) => b[1].lastActive - a[1].lastActive);
   const projects = [];
@@ -2063,53 +2840,82 @@ async function agentProjects(force = false) {
   return data;
 }
 
-// ==== 二开: cockpit —— 项目 → Claude session 列表（侧栏驾驶舱数据源）====
-// 复用 agentProjects() 的项目发现 + parseClaudeSession 的单文件解析（带 size/mtime 缓存），
-// 只聚合 Claude 的会话（codex/kimi/opencode 不进侧栏）。自定义名与命令模板存 config.json。
+// ==== 二开: cockpit —— 项目 → Claude + Antigravity 混合 session 列表（侧栏驾驶舱数据源）====
+// 同一目录树下合并两家会话，按最后活跃降序混排，靠 agent 字段标识引擎。自定义名与命令模板存 config.json。
 const SESS_RESUME_DEFAULT = 'claudex -r {id}';
 const SESS_NEW_DEFAULT = 'claudex';
+const SESS_AGY_RESUME_DEFAULT = 'agy --conversation {id}';
+const SESS_AGY_NEW_DEFAULT = 'agy';
 
 async function agentSessions() {
-  const [projData, cfg, liveIds] = await Promise.all([agentProjects(), readConfig(), liveClaudeSessionIds()]);
+  const [projData, cfg, liveIds, agyLiveMap, agyRows] = await Promise.all([
+    agentProjects(), readConfig(), liveClaudeSessionIds(), liveAgySessions(), listAgySummaries(),
+  ]);
   const names = cfg.sessionNames || {};
   const activeWindowMs = Number(cfg.sessionActiveWindowMs) || 60000;
   const now = Date.now();
+  const agyByCwd = new Map();
+  for (const r of agyRows) {
+    let arr = agyByCwd.get(r.cwd);
+    if (!arr) { arr = []; agyByCwd.set(r.cwd, arr); }
+    arr.push(r);
+  }
   const projects = [];
   await Promise.all((projData.projects || []).map(async (pj) => {
+    const sessions = [];
+    // ① Claude Code 会话
     const dir = path.join(CLAUDE_PROJ, mungeClaudeDir(pj.path));
-    let entries;
-    try { entries = await fsp.readdir(dir); } catch { return; } // 纯 codex 项目没有 claude 目录，不进侧栏
-    const files = [];
-    await Promise.all(entries.filter((n) => n.endsWith('.jsonl')).map(async (n) => {
+    let entries = [];
+    try { entries = await fsp.readdir(dir); } catch { entries = []; } // 纯 Antigravity 项目无 Claude 目录，继续合并
+    if (entries.length) {
+      const files = [];
+      await Promise.all(entries.filter((n) => n.endsWith('.jsonl')).map(async (n) => {
+        try {
+          const fp = path.join(dir, n);
+          // 同目录混着别的项目的会话（汉字名撞车）：cwd 明确不是本项目就不收；读不到 cwd 的保持旧行为
+          const cwd = await sessionFileCwd(fp);
+          if (cwd && cwd !== pj.path) return;
+          files.push({ fp, st: await fsp.stat(fp) });
+        } catch { /* */ }
+      }));
+      files.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
+      for (const f of files.slice(0, 50)) {
+        try {
+          const s = await parseClaudeSession(f.fp, f.st);
+          // 空会话（无人打过字、也没标题）多半是探测/崩溃残留，列出来只添乱
+          if (!s.title && !s.userMsgs) continue;
+          // 状态只属于「被某个软件打开着」的会话（注册表 + 进程探活）；闭合会话无状态
+          const open = liveIds.has(s.id);
+          sessions.push({ id: s.id, agent: 'claude', title: s.title, name: names[s.id] || '', model: s.model || '', lastT: s.lastT, userMsgs: s.userMsgs, open, status: open ? decideSessionStatus(s, activeWindowMs, now) : null });
+        } catch { /* 单文件解析失败不拖累整个项目 */ }
+      }
+    }
+    // ② Antigravity 会话
+    const agyList = (agyByCwd.get(pj.path) || []).slice(0, 50);
+    await Promise.all(agyList.map(async (r) => {
       try {
-        const fp = path.join(dir, n);
-        // 同目录混着别的项目的会话（汉字名撞车）：cwd 明确不是本项目就不收；读不到 cwd 的保持旧行为
-        const cwd = await sessionFileCwd(fp);
-        if (cwd && cwd !== pj.path) return;
-        files.push({ fp, st: await fsp.stat(fp) });
+        const open = agyLiveMap.has(r.id);
+        const meta = await agyConvMeta(r.id);
+        const status = open ? await decideAgySessionStatus(r, meta.stepStatus, activeWindowMs, now) : null;
+        sessions.push({
+          id: r.id, agent: 'agy', title: r.title, name: names[r.id] || '', model: meta.model || '',
+          lastT: r.lastT, userMsgs: Math.max(1, Math.floor(r.stepCount / 2)),
+          open, status,
+        });
       } catch { /* */ }
     }));
-    files.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
-    const sessions = [];
-    for (const f of files.slice(0, 50)) {
-      try {
-        const s = await parseClaudeSession(f.fp, f.st);
-        // 空会话（无人打过字、也没标题）多半是探测/崩溃残留，列出来只添乱
-        if (!s.title && !s.userMsgs) continue;
-        // 状态只属于「被某个软件打开着」的会话（注册表 + 进程探活）；闭合会话无状态
-        const open = liveIds.has(s.id);
-        sessions.push({ id: s.id, title: s.title, name: names[s.id] || '', lastT: s.lastT, userMsgs: s.userMsgs, open, status: open ? decideSessionStatus(s, activeWindowMs, now) : null });
-      } catch { /* 单文件解析失败不拖累整个项目 */ }
-    }
     if (!sessions.length) return;
     sessions.sort((a, b) => b.lastT - a.lastT);
-    projects.push({ path: pj.path, name: pj.name, lastActive: pj.lastActive, sessions });
+    const trimmed = sessions.slice(0, 50);
+    projects.push({ path: pj.path, name: pj.name, lastActive: Math.max(pj.lastActive, trimmed[0].lastT || 0), sessions: trimmed });
   }));
   projects.sort((a, b) => b.lastActive - a.lastActive);
   return {
     ok: true,
     resumeCmd: cfg.sessionResumeCmd || SESS_RESUME_DEFAULT,
     newCmd: cfg.sessionNewCmd || SESS_NEW_DEFAULT,
+    agyResumeCmd: cfg.agyResumeCmd || SESS_AGY_RESUME_DEFAULT,
+    agyNewCmd: cfg.agyNewCmd || SESS_AGY_NEW_DEFAULT,
     activeWindowMs,
     projects,
   };
@@ -2722,7 +3528,7 @@ const server = http.createServer(async (req, res) => {
       return serveRaw(req, res, fsPath);
     }
     if (p === '/api/thumb') {
-      return serveThumb(req, res, qp.get('path'), parseInt(qp.get('w') || '240', 10));
+      return serveThumb(req, res, qp.get('path'), parseInt(qp.get('w') || '240', 10), qp.get('v'));
     }
     if (p === '/api/img-proxy') {
       return proxyImage(res, qp.get('url'));
@@ -2744,7 +3550,16 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/locate') {
       const extraRoots = String(qp.get('roots') || '').split('\n').filter(Boolean).slice(0, 3);
-      return sendJSON(res, 200, await locatePath(qp.get('path'), qp.get('name'), qp.get('root'), qp.get('tail'), qp.get('alt'), extraRoots));
+      const loc = await locatePath(qp.get('path'), qp.get('name'), qp.get('root'), qp.get('tail'), qp.get('alt'), extraRoots);
+      // ==== 二开: cockpit ==== 附带单文件 entry 元信息，驾驶舱内按 tab 打开右侧预览无需再拉整目录 /api/list
+      if (loc && loc.found && !loc.isDir && loc.path) {
+        try {
+          const st = await fsp.stat(loc.path);
+          const nm = path.basename(loc.path);
+          loc.entry = { name: nm, path: loc.path, isDir: false, kind: kindOf(nm, false), size: st.size, mtime: st.mtimeMs, btime: st.birthtimeMs || 0 };
+        } catch { /* */ }
+      }
+      return sendJSON(res, 200, loc);
     }
     if (p === '/api/git') {
       return sendJSON(res, 200, await gitStatus(qp.get('path') || HOME));
@@ -2764,6 +3579,12 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/snapshots') {
       return sendJSON(res, 200, await snapList(qp.get('path')));
+    }
+    if (p === '/api/snapshots/usage') {
+      return sendJSON(res, 200, await snapUsage());
+    }
+    if (p === '/api/snapshots/clean' && req.method === 'POST') {
+      return sendJSON(res, 200, await snapClean(await readBody(req)));
     }
     if (p === '/api/snapshot-restore' && req.method === 'POST') {
       const b = await readBody(req);
@@ -2794,6 +3615,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/archive') {
       return sendJSON(res, 200, await archiveList(url.searchParams.get('path')));
+    }
+    // ==== 二开: office —— Office 三件套原地预览 ====
+    if (p === '/api/office') {
+      return sendJSON(res, 200, await officePreview(url.searchParams.get('path')));
     }
     if (p === '/api/du') {
       return sendJSON(res, 200, await diskUsage(url.searchParams.get('path')));
@@ -2875,7 +3700,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, await agentSessions());
     }
     if (p === '/api/session-host') {
-      return sendJSON(res, 200, await sessionHost(qp.get('id') || ''));
+      return sendJSON(res, 200, await sessionHost(qp.get('id') || '', qp.get('agent') || ''));
     }
     if (p === '/api/session-name' && req.method === 'POST') {
       const b = await readBody(req);
@@ -3010,6 +3835,7 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('  🏠  根目录:', HOME);
   console.log('\n  按 Ctrl+C 退出\n');
   pruneThumbs().catch(() => {}); // 启动时裁剪缩略图缓存，防止无限增长
+  snapReapAll().catch(() => {}); // 清掉一个快照都没有的影子仓库（只剩失败 commit 堆下的孤立对象）
   if (!process.env.FANBOX_NO_OPEN) {
     const opener = PLATFORM === 'darwin' ? 'open' : PLATFORM === 'win32' ? 'start' : 'xdg-open';
     exec(`${opener} ${link}`, () => {});

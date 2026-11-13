@@ -717,6 +717,8 @@ kbd {
 .snap-dialog { width: 620px; max-width: 94vw; }
 .snap-body { max-height: 68vh; overflow-y: auto; margin-top: 8px; }
 .snap-hint { font-size: 11.5px; color: var(--text-faint); padding: 2px 6px 8px; }
+.snap-usage { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--text-faint); padding: 6px 6px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.snap-usage span { flex: 1; }
 .snap-row { display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px solid var(--border); }
 .snap-row:last-child { border-bottom: none; }
 .snap-time { flex: none; font-family: var(--font-mono); font-size: 12px; color: var(--text); min-width: 44px; }
@@ -1439,10 +1441,34 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 #term-replay { position: relative; }
 #term-replay.has-rec::after { content: ''; position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border-radius: 50%; background: #e5484d; }
 
-/* ==== 二开: cockpit —— 驾驶舱布局 + 侧栏 session 列表 ==== */
-/* 布局：文件区/分隔条隐藏（代码照常运行），终端吃满主区 */
+/* ==== 二开: cockpit —— 驾驶舱布局 + 侧栏 session 列表 + 按 tab 右侧文件抽屉 ==== */
+/* 布局：文件列表区/终端外分隔条隐藏；终端面板吃满主区，内部 .term-head 统领下方 #term-body（左终端 + 右预览） */
 #app.cockpit #filemgmt, #app.cockpit #terminal-resizer { display: none !important; }
 #app.cockpit #terminal-panel { flex: 1 1 auto !important; width: auto !important; height: auto !important; }
+#app.cockpit #term-body { flex: 1 1 auto; display: flex; flex-direction: row; min-height: 0; min-width: 0; position: relative; overflow: hidden; }
+#app.cockpit #xterm-host { flex: 1 1 0; min-width: 220px; }
+#app.cockpit #preview-resizer { cursor: col-resize !important; flex: 0 0 9px; width: 9px; margin: 0 -4px; height: auto; z-index: 15; }
+#app.cockpit #preview-resizer::after { inset: 0 3.5px; }
+#app.cockpit #preview { border-top: none !important; border-left: 1px solid var(--border); height: 100%; }
+body:has(#preview-resizer.dragging) iframe, body:has(#preview-resizer.dragging) #xterm-host { pointer-events: none; }
+body:has(#preview-resizer.dragging) #preview { transition: none !important; }
+
+/* ==== 二开: office —— Office 三件套原地预览样式 ==== */
+.office-tabs { display: flex; flex-wrap: nowrap; gap: 5px; padding: 6px 14px 8px; overflow-x: auto; border-bottom: 1px solid var(--border); scrollbar-width: thin; }
+.office-tab { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-2); color: var(--text-dim); font-size: 12px; cursor: pointer; transition: 0.12s; }
+.office-tab:hover { color: var(--text); border-color: var(--accent); }
+.office-tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.office-tab i { font-style: normal; font-size: 10.5px; opacity: 0.65; font-variant-numeric: tabular-nums; }
+.office-sheet-wrap thead th { position: sticky; top: 0; z-index: 2; background: var(--bg-2); }
+.office-doc img { max-width: 100%; height: auto; border-radius: 6px; margin: 8px 0; }
+.office-doc .office-li { margin: 4px 0; padding-left: 10px; }
+.office-slides { display: flex; flex-direction: column; gap: 14px; padding: 14px; }
+.office-slide { position: relative; padding: 20px 22px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-2); min-height: 160px; }
+.office-slide-no { position: absolute; top: 12px; right: 14px; font-size: 11px; color: var(--text-faint); font-family: var(--font-mono); }
+.office-slide-title { margin: 0 48px 10px 0; font-size: 16px; color: var(--text); }
+.office-slide p { margin: 6px 0; font-size: 13.5px; line-height: 1.65; color: var(--text-dim); }
+.office-slide-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.office-slide-imgs img { max-height: 220px; max-width: 100%; border-radius: 6px; object-fit: contain; }
 /* 顶栏：文件向工具全部藏掉，只留侧栏折叠按钮 + 面包屑（当前落点路径提示） */
 #app.cockpit .topbar-actions > * { display: none; }
 /* 终端头：铺满/停靠/收起/文件跟随在驾驶舱里没有意义 */
@@ -1460,9 +1486,13 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .proj-li:hover .proj-add { opacity: 0.7; }
 .proj-li .proj-add:hover { opacity: 1; color: var(--accent); background: var(--bg-3); }
 
-/* session 行：圆点按四态着色（与是否在 FanBox 打开无关），文字亮/灰表示打开态 */
+/* session 行：圆点按四态着色，引擎小图标区分 Claude Code / Antigravity，文字亮/灰表示打开态 */
 .sess-list { padding-left: 20px; }
-.sess-li { position: relative; }
+.sess-li { position: relative; gap: 6px; }
+.sess-li .sess-agent-ic { width: 13px; height: 13px; flex-shrink: 0; object-fit: contain; transition: opacity 0.12s, filter 0.12s; }
+.sess-li.sess-closed .sess-agent-ic { opacity: 0.52; filter: saturate(0.75); }
+.sess-li.sess-closed:hover .sess-agent-ic, .sess-li.sess-open .sess-agent-ic { opacity: 1; filter: none; }
+.term-tab .tab-agent-ic { width: 12px; height: 12px; flex-shrink: 0; object-fit: contain; }
 .sess-li .sess-dot { flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); opacity: 0.4; }
 .sess-li .sess-dot.st-running { background: #4c8dff; opacity: 1; animation: tabpulse 1.1s ease-in-out infinite; }
 .sess-li .sess-dot.st-waiting { background: #ff9f43; opacity: 1; }
