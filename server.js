@@ -675,7 +675,8 @@ async function parseClaudeSession(fp, st) {
     // ==== 二开: cockpit —— 四态判定的三个标量（lastSignal / bg 句柄栈 / 通知回收）====
     // sidechain（subagent 内部消息）不参与：它的收尾不代表主对话的收尾
     if (!line.includes('"isSidechain":true')) {
-      // 提取该会话最后一次选定/运行的模型（保留 [1m] 等上下文后缀，供续接时 --model 原样恢复）
+      // 提取该会话客户端侧真实设定的模型 ID（只信 attachment.identity.modelId 与 /model 回执，保留渠道前缀与 [1m]；
+      // 绝不用网关回包的 assistant.message.model 覆盖——网关回包会剥掉 [1m] 并改写成后端底层名如 deepseek-v4-flash）
       if (line.includes('"type":"attachment"') && line.includes('"modelId":"')) {
         try {
           const d = JSON.parse(line);
@@ -693,14 +694,6 @@ async function parseClaudeSession(fp, st) {
         } catch { /* */ }
       }
       if (line.includes('"type":"assistant"')) {
-        if (line.includes('"model":"')) {
-          const mm = line.match(/"model":"([A-Za-z0-9._:\-\[\]\/]+)"/);
-          if (mm) {
-            const rawM = mm[1];
-            // API 回包会剥掉 [1m] 后缀：若当前已记了同源带后缀名则保留完整名，换了其它模型才更新
-            if (!sess.model || sess.model.replace(/\[[^\]]*\]$/, '') !== rawM.replace(/\[[^\]]*\]$/, '')) sess.model = rawM;
-          }
-        }
         if (line.includes('"type":"tool_use"')) {
           try {
             const d = JSON.parse(line);
@@ -2847,10 +2840,34 @@ const SESS_NEW_DEFAULT = 'claudex';
 const SESS_AGY_RESUME_DEFAULT = 'agy --conversation {id}';
 const SESS_AGY_NEW_DEFAULT = 'agy';
 
-async function agentSessions() {
-  const [projData, cfg, liveIds, agyLiveMap, agyRows] = await Promise.all([
-    agentProjects(), readConfig(), liveClaudeSessionIds(), liveAgySessions(), listAgySummaries(),
+async function readDefaultAgentModels() {
+  let claudeDef = '', agyDef = '';
+  await Promise.all([
+    fsp.readFile(path.join(HOME, '.claude', 'settings.json'), 'utf8').then((txt) => {
+      const j = JSON.parse(txt);
+      claudeDef = String((j && j.env && j.env.ANTHROPIC_MODEL) || (j && j.model) || '').trim();
+    }).catch(() => {}),
+    fsp.readFile(path.join(AGY_HOME, 'settings.json'), 'utf8').then((txt) => {
+      const j = JSON.parse(txt);
+      agyDef = String((j && j.model) || '').trim();
+    }).catch(() => {}),
   ]);
+  return { claudeDef, agyDef };
+}
+
+async function agentSessions() {
+  const [projData, cfg, liveIds, agyLiveMap, agyRows, defModels] = await Promise.all([
+    agentProjects(), readConfig(), liveClaudeSessionIds(), liveAgySessions(), listAgySummaries(), readDefaultAgentModels(),
+  ]);
+  // 若会话所用模型与本机当前默认模型一致（含代理网关对 deepseek-v4 默认模型的无后缀别名），resumeModel 置空 → 走原旧方式裸跑续接命令
+  const normBase = (x) => String(x || '').replace(/\[[^\]]*\]$/, '');
+  const isSameModel = (a, b) => {
+    if (!a || !b) return false;
+    const na = normBase(a), nb = normBase(b);
+    if (a === b || na === nb) return true;
+    if (na === 'deepseek-v4-flash' && nb.startsWith('deepseek-v4')) return true;
+    return false;
+  };
   const names = cfg.sessionNames || {};
   const activeWindowMs = Number(cfg.sessionActiveWindowMs) || 60000;
   const now = Date.now();
@@ -2886,7 +2903,8 @@ async function agentSessions() {
           if (!s.title && !s.userMsgs) continue;
           // 状态只属于「被某个软件打开着」的会话（注册表 + 进程探活）；闭合会话无状态
           const open = liveIds.has(s.id);
-          sessions.push({ id: s.id, agent: 'claude', title: s.title, name: names[s.id] || '', model: s.model || '', lastT: s.lastT, userMsgs: s.userMsgs, open, status: open ? decideSessionStatus(s, activeWindowMs, now) : null });
+          const resumeModel = s.model && !isSameModel(s.model, defModels.claudeDef) ? s.model : '';
+          sessions.push({ id: s.id, agent: 'claude', title: s.title, name: names[s.id] || '', model: s.model || '', resumeModel, lastT: s.lastT, userMsgs: s.userMsgs, open, status: open ? decideSessionStatus(s, activeWindowMs, now) : null });
         } catch { /* 单文件解析失败不拖累整个项目 */ }
       }
     }
@@ -2897,8 +2915,9 @@ async function agentSessions() {
         const open = agyLiveMap.has(r.id);
         const meta = await agyConvMeta(r.id);
         const status = open ? await decideAgySessionStatus(r, meta.stepStatus, activeWindowMs, now) : null;
+        const resumeModel = meta.model && !isSameModel(meta.model, defModels.agyDef) ? meta.model : '';
         sessions.push({
-          id: r.id, agent: 'agy', title: r.title, name: names[r.id] || '', model: meta.model || '',
+          id: r.id, agent: 'agy', title: r.title, name: names[r.id] || '', model: meta.model || '', resumeModel,
           lastT: r.lastT, userMsgs: Math.max(1, Math.floor(r.stepCount / 2)),
           open, status,
         });

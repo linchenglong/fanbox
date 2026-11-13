@@ -6,7 +6,7 @@
 
 ## 与上游共存的约定
 
-- 所有二开代码块用 `==== 二开` 注释围起（`grep -an "==== 二开"` 五个文件全量认领；**必须 `-a`**——`public/app.js` 有 7 个上游遗留的 NUL 字节，不带会被当二进制跳过）
+- 所有二开代码块用 `==== 二开` 注释围起（`grep -an "==== 二开" server.js public/app.js public/style.css electron/main.js electron/preload.js electron/wechat/env.js` 六个文件全量认领；**必须 `-a`**——`public/app.js` 有 7 个上游遗留的 NUL 字节，不带会被当二进制跳过）
 - 上游冲突面实测（2026-10-12，干跑合并上游 2.17.0，落后 42 个提交）：只有 `public/app.js`、`public/style.css`、`package-lock.json` 冲突，`server.js`/`electron/main.js`/`electron/preload.js` 自动合并。干跑命令：`git merge-tree --write-tree --name-only master upstream/master`
 - 文件区/预览等上游功能**隐藏不删**（`display:none`），代码照常运行——换取 merge 上游时的最小冲突面
 - 控制台 `fbCockpit(false)` 随时切回上游原版三栏布局
@@ -125,10 +125,11 @@
 ### 16. 会话原模型记忆续接 + 重启自动原位恢复 Tab
 
 - **双引擎最后使用模型解析（`server.js`）**：
-  - **Claude Code**：`parseClaudeSession` 按序读取 `attachment.identity.modelId`、`/model` 本地回执 `Set model to \`...\``（完整保留 `[1m]` 上下文窗口后缀）及 `assistant.message.model` 兜底（防止被 `settings.json` 的 `ANTHROPIC_MODEL` 重置回默认模型）
+  - **Claude Code**：`parseClaudeSession` 仅采信客户端侧 `attachment.identity.modelId` 与 `/model` 本地回执 `Set model to \`...\``（完整保留渠道前缀与 `[1m]` 1M 上下文后缀；**禁用**网关回包 `assistant.message.model` 兜底——代理网关回包会剥掉 `[1m]` 并改写为后端底层名如 `deepseek-v4-flash`）
   - **Antigravity (`agy`)**：`agyConvMeta` 读取单会话库 `gen_metadata` 末步 protobuf field 21（`0xaa 0x01`）模型显示名（如 `Claude Opus 4.6 (Thinking)`）
-- **两条续接路径统一出口（`buildSessionResumeCmd`）**：侧栏点击关闭会话（`openSession`）与重启自动恢复（`term.restore`）共用同一命令构建器，单引号安全包裹追加 `--model '<model>'`（防 zsh 将 `[1m]` 或空格括号解析为通配符/语法错误）
-- **快照升级（`persistTabs` / `restore`）**：`localStorage` `fb_term_tabs` 持久化每个活 Tab 的 `{ cwd, sid, agent, model, title, file }`（上限 16 个标签，还原期间挂 `_restoring` 锁）；重启后第 0 帧恢复标题、引擎图标与右侧关联文件，排除外部终端已开会话后原位自动跑带 `--model` 的续接命令，并给足 25s 启动宽限期
+  - **默认模型走原旧方式裸续接**：`readDefaultAgentModels` 实时读取 `~/.claude/settings.json`（`env.ANTHROPIC_MODEL || model`）与 `~/.gemini/antigravity-cli/settings.json`（`model`）；若会话模型与当前默认模型一致（含 `deepseek-v4-flash` 网关别名），`resumeModel` 置空，前端直接走原旧方式裸跑 `claudex -r {id}` / `agy --conversation {id}`（自动继承默认 `[1m]` 配置），**仅切过非默认模型的会话才追加 `--model '<resumeModel>'`**
+- **两条续接路径统一出口（`buildSessionResumeCmd`）**：侧栏点击关闭会话（`openSession`）与重启自动恢复（`term.restore`）共用同一命令构建器，单引号安全包裹 `--model` 参数（防 zsh 将 `[1m]` 或空格括号解析为通配符/语法错误）
+- **快照升级（`persistTabs` / `restore`）**：`localStorage` `fb_term_tabs` 持久化每个活 Tab 的 `{ cwd, sid, agent, model, title, file }`（上限 16 个标签，还原期间挂 `_restoring` 锁）；重启后第 0 帧恢复标题、引擎图标与右侧关联文件，排除外部终端已开会话后原位自动续接，并给足 25s 启动宽限期
 - **顺手加固 PTY 污染变量清理**：跟进 Claude Code v2.1.303，在 `pty:spawn` 与 `~/bin/fanbox` 补充剥离 `CLAUDE_CODE_CHILD_SESSION`、`CLAUDE_CODE_SESSION_ATTENDED`、`CLAUDE_CODE_MESSAGING_*`、`CLAUDE_PID`，根绝 `Transcript saving is off`
 
 ### 17. 定向摘入上游三项核心修复（来自 v2.14.0 / v2.15.0 / v2.17.1）

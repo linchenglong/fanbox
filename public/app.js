@@ -2163,7 +2163,8 @@ function syncSessTabTitles() {
     const s = byId.get(t.claudeSessionId);
     if (!s) return;
     if (s.agent && t.sessionAgent !== s.agent) { t.sessionAgent = s.agent; changed = true; }
-    if (s.model && t.sessionModel !== s.model) { t.sessionModel = s.model; metaUpdated = true; }
+    const rm = s.resumeModel !== undefined ? (s.resumeModel || '') : (s.model || '');
+    if (t.sessionModel !== rm) { t.sessionModel = rm; metaUpdated = true; }
     const want = sessDisplayName(s).slice(0, 14);
     if (t.title !== want) { t.title = want; changed = true; }
   });
@@ -2331,7 +2332,7 @@ function sessLi(pj, s) {
   } else {
     li.append(dot, agIcon, label, more);
   }
-  li.onclick = () => openSession(pj.path, s.id, agent, s.model || '');
+  li.onclick = () => openSession(pj.path, s.id, agent, s.resumeModel || '');
   return li;
 }
 
@@ -2349,10 +2350,10 @@ function togglePinSession(sessId) {
 // 不真的敲 `cd`——pty spawn 时 cwd 就是项目目录，效果等价且不脏 shell 历史。
 async function openSession(projPath, sessId, agent = 'claude', model = '') {
   if (!term.available()) { toast('内嵌终端不可用（网页版）——请用桌面 App 打开会话', true); return; }
-  // 若调用处未传 model，兜底从 sessUI 最新缓存里按 id 查找
+  // 若调用处未传 model，兜底从 sessUI 最新缓存里按 id 查找非默认 resumeModel（默认模型时为空，走原旧方式不拼 --model）
   if (!model) {
     const hit = sessUI.projects.flatMap((p) => p.sessions).find((x) => x.id === sessId);
-    if (hit && hit.model) model = hit.model;
+    if (hit && hit.resumeModel) model = hit.resumeModel;
   }
   // ① 前端自己标记过的 tab（点侧栏开出来的）
   const live = term.sessions.find((s) => !s.dead && s.claudeSessionId === sessId);
@@ -2448,7 +2449,7 @@ function adoptLiveSessions() {
     if (!cur || (cand.lastT > cur.lastT && cur.lastT < (t.sessSpawnT || 0) + 15000)) {
       t.claudeSessionId = cand.id;
       t.sessionAgent = cand.agent || t.sessionAgent || 'claude';
-      if (cand.model) t.sessionModel = cand.model;
+      t.sessionModel = cand.resumeModel || '';
       claimed.add(cand.id);
       term.persistTabs();
     }
@@ -2476,7 +2477,7 @@ async function adoptByHost() {
           if (!t) continue;
           t.claudeSessionId = s.id;
           t.sessionAgent = s.agent || 'claude';
-          if (s.model) t.sessionModel = s.model;
+          t.sessionModel = s.resumeModel || '';
           t.claudeProj = p.path;
           claimed.add(s.id);
           adopted = true;
