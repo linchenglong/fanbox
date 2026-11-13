@@ -6,7 +6,8 @@
 
 ## 与上游共存的约定
 
-- 所有二开代码块用 `==== 二开` 注释围起（`grep -n "==== 二开"` 五个文件全量认领）
+- 所有二开代码块用 `==== 二开` 注释围起（`grep -an "==== 二开"` 五个文件全量认领；**必须 `-a`**——`public/app.js` 有 7 个上游遗留的 NUL 字节，不带会被当二进制跳过）
+- 上游冲突面实测（2026-10-12，干跑合并上游 2.17.0，落后 42 个提交）：只有 `public/app.js`、`public/style.css`、`package-lock.json` 冲突，`server.js`/`electron/main.js`/`electron/preload.js` 自动合并。干跑命令：`git merge-tree --write-tree --name-only master upstream/master`
 - 文件区/预览等上游功能**隐藏不删**（`display:none`），代码照常运行——换取 merge 上游时的最小冲突面
 - 控制台 `fbCockpit(false)` 随时切回上游原版三栏布局
 
@@ -85,25 +86,63 @@
 - **claude 输入框 ↑/↓ 边界移动**：首/末行但光标不在行首/行尾时，↑/↓ 先发 `\x01`/`\x05`（readline 行首/行尾）；已在边界才放行原生键翻历史。屏读判定：`❯` 行 + 续行两空格缩进 + 底边框。两个坑：**claude TUI 本身跑在 alternate screen**（不能按 `buf.type` 排除 vim/less，靠屏读特征区分）；**`❯` 后缀与续行缩进是 NBSP（\xa0）非普通空格**（`rowText` 统一归一化）。认不出的形态一律放行原生键，最差回退原生行为
 - **反向认领 `adoptByHost`**：手动敲 claudex / 重启还原的 tab 没有 `claudeSessionId` 标记，`adoptLiveSessions` 只认 `claudeProj` 轮不到它——发消息后侧栏名字换了 tab 标题不动。挂 15s 轮询：对「开着但没 tab 认领」的会话查 `/api/session-host`（FANBOX_TERM_ID 反查 tab id）自动补标记 + 刷标题。与第 8 节点击侧栏时的手动配对同一数据源，差别是不用等用户点击
 
-### 11. 侧栏项目修正（fix/agent-projects）
+### 11. v1.3.2 侧栏项目修正（7b27d12, 8a8fe6b）
 
 - **只收 Claude 项目**：删掉 `agentProjects` 的 Codex 扫描。Codex 项目本来就不进侧栏（`agentSessions` 找不到 claude 目录就跳过），却先占 12 个名额——实测 12 个里 5 个纯 Codex 被丢，侧栏只剩 7 个
 - **项目身份 = 会话文件头的 cwd，不是目录名**：claude 的目录名把每个非字母数字字符（含每个汉字）压成 `-`，`BAA定位` 与 `BAA记忆` 同落 `...-Program-BAA--`。旧逻辑每目录只取最新会话的 cwd，后者整个项目消失、会话还混进前者名下。新增 `sessionFileCwd`（逐文件读头部 cwd，读到即按文件缓存，cwd 终身不变）；`agentProjects` 逐文件归属，`agentSessions` 只收 cwd 属于本项目的会话（cwd 读不到的保持旧行为）。175 个近 30 天会话文件冷读 75ms
 - **上限**：项目 12→20，每项目会话 40→50
-- 验证没起第二个 FanBox 实例（会再起一套定时任务调度器，有重复触发风险）：加载 `server.js` 时让 `listen`/写盘/定时器空转，只导出 `agentProjects`/`agentSessions` 跑真实数据
+- 验证用「空转装置」加载 `server.js` 跑真实数据，没起第二个实例（见「验证方式」）
 
-### 12. TERM_PROGRAM 归属改写（fix/term-program）
+### 12. v1.3.2 TERM_PROGRAM 归属改写（64e1328, 39b511e）
 
 - **症状**：Terminal.app 随机弹出空终端窗口。**根因**：FanBox 从 Terminal.app 启动（`npm start`）时 `process.env` 带 `TERM_PROGRAM=Apple_Terminal`，子进程里的 claude 因此走「Apple Terminal 响铃通知」分支——每次发通知前跑 `osascript -e 'tell application "Terminal" to name of current settings of front window'`（claude 二进制内嵌的 JS 里可见），Terminal 没在运行时这条 Apple Event 会把它拉起
 - **改法**：两个子进程出口都把 `TERM_PROGRAM` 改写成 `fanbox`、删 `TERM_PROGRAM_VERSION`：`electron/main.js` 的 `pty:spawn`（终端 tab；定时任务也经此）、`electron/wechat/env.js` 的 `build()`（微信桥拉起的无头 claude/codex）。claude 识别不了宿主就不发响铃通知，与从 Dock 启动（`TERM_PROGRAM` 本就未设）一致
 - **验证**：真实 PTY 对照（模拟 Apple_Terminal 启动）——改前子进程 `TERM_PROGRAM=Apple_Terminal`/版本 `455`，改后 `fanbox`/空，login shell 的启动文件不会改回；`env.js` 的 `fullEnv()` 直接实测。**只对重启后新开的终端生效**，运行中的 tab 环境已定
 - **未实证**：「空终端不再弹」本身是随机现象，需长期观察
 
+### 13. Antigravity (`agy`) 双引擎驾驶舱接入
+
+- **同树混排与项目归属**：`agentProjects` / `agentSessions` 同时聚合 Claude Code（`~/.claude/projects/**/*.jsonl`）与 Google Antigravity CLI（`~/.gemini/antigravity-cli/conversation_summaries.db` SQLite WAL 权威索引，排除 `nesting_depth>0` 子会话及单会话 `.db` 已删的孤儿摘要），同一 `cwd` 下的两家会话按 `lastT` 降序混排。同时剔除 `/tmp`、`/private/var/folders` 等系统临时目录（防评测/网关无头会话挤占 20 个项目名额）
+- **WAL 感知缓存**：`sqliteDbSig` 同时校验 `.db` 与 `.db-wal` 的 `size + mtimeMs`，未写入时 0ms 命中内存缓存；冷读 `sqlite3 -json` 约 14ms
+- **探活与宿主定位**：活着的 `agy` 进程持有 `~/.gemini/antigravity-cli/presence/<uuid>.lock` 打开句柄。`liveAgySessions` 先 `pgrep -x agy` 再 `lsof -nP -a -p <pids> -F pn` 定向反查 `<uuid> → pid`（无 `agy` 进程时免调 `lsof`）；`sessionHost` 共用 `ps eww` 读取 `FANBOX_TERM_ID` 配对本地 tab / 拦截外部宿主双开
+- **四态对齐**：活会话结合 `summary.status`（`CASCADE_RUN_STATUS_*`）与单会话库 `steps` 末步状态（protobuf `CortexStepStatus`：`9=WAITING` → 橙色等待确认，`1/2/8/11` 或 `RUNNING/BUSY` → 蓝色呼吸进行中，`not_fully_idle` → 紫色后台运行，其余 → 绿色完成）
+- **视觉区分与分流调度**：状态圆点专职表达运行四态，紧邻其右放置 13px 官方引擎图标（Claude 琥珀星芒 `claude.svg` / Antigravity 谷歌四色飞翼 `agy.svg`，闭合态降透明度退居二线，打开态全彩高亮；顶栏挂会话的 tab 同步替换为对应引擎图标）。点击未打开会话按 `agent` 自动分流执行 `sessionResumeCmd`（默认 `claudex -r {id}`）或 `agyResumeCmd`（默认 `agy --conversation {id}`）；项目行右侧 `＋` 升级为新建 Claude / Antigravity 二选一菜单；`AGENT_REGISTRY` 同步内置 `agy`
+- **配套 `~/bin/agy` 最高权限包装**：对交互会话与单次任务默认注入 `--dangerously-skip-permissions`（管理类子命令 `update`/`mcp`/`models` 等及已显式传参时自动豁免）
+
+### 14. 终端内点击文件 → 按 Tab 隔离的右侧文件展开区
+
+- **架构归属（Tab = 左终端 + 右专属文件区）**：`applyCockpit(true)` 动态挂载 `#term-body` 包裹 `#xterm-host`，并将上游现成的 `#preview-resizer` + `#preview` 迁入 `#term-body` 右侧（位于 `.term-head` Tab 栏正下方；`public/index.html` 零改动，`fbCockpit(false)` 随时原样迁回 `#filemgmt`），100% 零拷贝复用上游 Markdown 富文本/排版、HTML 实时预览、Monaco 代码编辑、CSV 表格、图片灯箱、PDF 与选中文字甩回终端等全套能力
+- **按 Tab 状态隔离（`cockpitPreview`）**：每个终端 Tab 独立持有 `s.cockpitFile`。在 Tab 3 点击路径在右侧展开文件 A → 切换到未开文件的 Tab 2 时自动保存改动并瞬切收起右侧、终端自适应铺满全宽 → 切回 Tab 3 自动恢复文件 A；点右上角 `✕` 或按 `Esc` 仅解绑当前 Tab 的文件，不影响其它 Tab
+- **链接识别与打开增强**：在 xterm `registerLinkProvider` 基础上补充 `file://` URI 识别；`openTermPath` 支持 `file://` 解码、`:line(:col)` / `#Lline` 行号提取（Monaco 自动居中跳行），基准目录优先取点击所属 Tab 自身的实时工作目录，驾驶舱下直出单文件预览（`/api/locate` 附带 `entry` 元信息）不篡改全局面包屑目录；打开/恢复预览时不抢夺左侧终端键盘焦点；分栏拖拽分隔条为跨骑分界线的 9px 热区，宽度记忆在 `localStorage` `fb_cockpit_pvw`（默认占 46% 宽）
+
+### 15. Office 三件套原地预览（`xlsx/xls` · `docx/doc` · `pptx/ppt`）
+
+- **零 npm 依赖后端解析（`/api/office`）**：基于 Node 内置 `zlib.inflateRawSync` 实现 OOXML 内存 ZIP 读取器（60MB 内存护栏）
+  - **Excel**：`.xlsx` 直解 `sharedStrings`、`styles`（Excel 日期序列号自动还原为 `YYYY-MM-DD`）、`workbook` 多 Sheet 映射，大表借 `<dimension>` 秒取总行数并截取前 500 行 × 80 列（29MB 9-Sheet 表实测数十毫秒）；老版 `.xls` 走 `python3 -I` `xlrd` 兜底。前端渲染多 Sheet 胶囊切换栏 + 吸顶冻结表头网格表
+  - **Word**：`.docx` 栈式扫描 `<w:body>` 还原标题层级、粗斜下划线、超链接、嵌套表格及 `word/media/*` 内嵌图片（单图≤4MB、总图≤16MB Base64 嵌入，支持点击灯箱滚轮放大）；`.doc` 走 macOS `/usr/bin/textutil -convert html` 并剥除死黑字色适配暗色主题
+  - **PPT**：优先调用本机 LibreOffice `soffice --headless`（独立临时 `UserInstallation` 防桌面实例锁冲突）转原版排版 PDF 缓存至 `~/.fanbox/thumbs/office-<sha1>.pdf`（首开 ~4s，二次缓存 1ms）；未装 LibreOffice 时降级为纯 Node 解析 `ppt/slides/*` 16:9 图文卡片流
+
+### 16. 会话原模型记忆续接 + 重启自动原位恢复 Tab
+
+- **双引擎最后使用模型解析（`server.js`）**：
+  - **Claude Code**：`parseClaudeSession` 按序读取 `attachment.identity.modelId`、`/model` 本地回执 `Set model to \`...\``（完整保留 `[1m]` 上下文窗口后缀）及 `assistant.message.model` 兜底（防止被 `settings.json` 的 `ANTHROPIC_MODEL` 重置回默认模型）
+  - **Antigravity (`agy`)**：`agyConvMeta` 读取单会话库 `gen_metadata` 末步 protobuf field 21（`0xaa 0x01`）模型显示名（如 `Claude Opus 4.6 (Thinking)`）
+- **两条续接路径统一出口（`buildSessionResumeCmd`）**：侧栏点击关闭会话（`openSession`）与重启自动恢复（`term.restore`）共用同一命令构建器，单引号安全包裹追加 `--model '<model>'`（防 zsh 将 `[1m]` 或空格括号解析为通配符/语法错误）
+- **快照升级（`persistTabs` / `restore`）**：`localStorage` `fb_term_tabs` 持久化每个活 Tab 的 `{ cwd, sid, agent, model, title, file }`（上限 16 个标签，还原期间挂 `_restoring` 锁）；重启后第 0 帧恢复标题、引擎图标与右侧关联文件，排除外部终端已开会话后原位自动跑带 `--model` 的续接命令，并给足 25s 启动宽限期
+- **顺手加固 PTY 污染变量清理**：跟进 Claude Code v2.1.303，在 `pty:spawn` 与 `~/bin/fanbox` 补充剥离 `CLAUDE_CODE_CHILD_SESSION`、`CLAUDE_CODE_SESSION_ATTENDED`、`CLAUDE_CODE_MESSAGING_*`、`CLAUDE_PID`，根绝 `Transcript saving is off`
+
+### 17. 定向摘入上游三项核心修复（来自 v2.14.0 / v2.15.0 / v2.17.1）
+
+未整包合并上游 UI 改版，仅按上游原文逐字移植三项纯收益修复（保持与上游代码一致，方便后续 merge 自动消解）：
+- **快照硬门与空间清理（`62115f0`）**：修复 `commit` 超时被当成「无变化」导致孤立对象堆积与未备份误回滚；启动自动清理 0 快照失效影子仓库（`snapReapAll`）；缩略图生成后 5s 合批裁剪（`pruneThumbsSoon`，按磁盘块计）；存档面板增加总占用/当前项目占用显示与一键清理（驾驶舱在右上角 `⚙` 设置面板补充「回合存档与空间清理」入口）
+- **豆包等中文输入法标点修复（`2ec28c6` #66）**：单字符标点在 `keydown` 挂起改由 `keypress`/`input` 发出（`keyup` 兜底补发），解决不走组合态的中文输入法输出 `，。` 被键位英文 `, .` 顶掉的问题
+- **Markdown 本地图片渲染内存降 11 倍（`eb35a9a`）**：新增 `thumbUrl`/`canThumb`/`displayImgWidth` 与 `#preview-body` 二段式 `thumb → /fs/` 兜底，以及 `/api/thumb` ETag 304 协商缓存（排版导出仍走原图，图注无损保留已在 v2.8.0 基线内）
+
 ## 已知限制
 
 - xterm canvas 渲染与 CoreText 存在先天字形差异，字重 500 追回约九成观感
 - `npm run dist` 需先改掉 package.json 里原作者的签名配置（`identity`/`notarize`/`appId`）
-- Codex/kimi/opencode 的会话不进侧栏（只做 Claude）
+- Codex/kimi/opencode 的会话不进侧栏（只做 Claude Code + Antigravity）
 - `projectMemory`（项目记忆页，上游代码）仍按目录名读会话，汉字撞车的目录里会混入别的项目的会话——二开只修了侧栏
 
 ## 验证方式（历次实测手段）
@@ -112,5 +151,20 @@
 # 服务端数据
 curl -s http://127.0.0.1:4567/api/agent-sessions | jq '.projects[].sessions[] | {id, open, status}'
 # UI 实测：带 CDP 启动，Playwright connect_over_cdp 驱动真实 App
-npx electron . --remote-debugging-port=9223
+fanbox   # ~/bin/fanbox 启动器，已带 --remote-debugging-port=9223；停止 fanbox stop，日志 fanbox log
+```
+
+**服务端函数改了、又不想动正在用的实例**：不要另起第二个 FanBox（会再起一套定时任务调度器，重复触发并改写共用的 cron 文件）。改用「空转装置」——加载 `server.js` 但让 `listen`/写盘/`setInterval` 空转，只导出目标函数跑真实数据（2026-10-12 实测可用，v1.3.2 侧栏修正即靠它验证）：
+
+```bash
+node -e '
+const Module=require("module"),fs=require("fs"),path=require("path"),http=require("http");
+const SRC=process.argv[1];
+fs.writeFileSync=()=>{}; fs.mkdirSync=()=>{};
+http.createServer=()=>({on(){},listen(){},close(){}});
+global.setInterval=()=>({unref(){},ref(){}});
+const m=new Module(SRC,null); m.filename=SRC; m.paths=Module._nodeModulePaths(path.dirname(SRC));
+m._compile(fs.readFileSync(SRC,"utf8")+"\nmodule.exports={agentProjects,agentSessions};",SRC);
+m.exports.agentSessions().then(d=>{console.log("侧栏项目数:",d.projects.length);process.exit(0)});
+' "$PWD/server.js"
 ```
