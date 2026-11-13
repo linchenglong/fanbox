@@ -139,6 +139,13 @@
 - **豆包等中文输入法标点修复（`2ec28c6` #66）**：单字符标点在 `keydown` 挂起改由 `keypress`/`input` 发出（`keyup` 兜底补发），解决不走组合态的中文输入法输出 `，。` 被键位英文 `, .` 顶掉的问题
 - **Markdown 本地图片渲染内存降 11 倍（`eb35a9a`）**：新增 `thumbUrl`/`canThumb`/`displayImgWidth` 与 `#preview-body` 二段式 `thumb → /fs/` 兜底，以及 `/api/thumb` ETag 304 协商缓存（排版导出仍走原图，图注无损保留已在 v2.8.0 基线内）
 
+### 18. Antigravity (`agy`) 专版阅读优化（与 Claude Code 物理隔离）
+
+- **问题**：`agy` TUI 块间不留空行，在 `lineHeight: 1.2` 下上下紧贴，且思考灰字易被亮色背景垫图干扰
+- **专版隔离实现（`term.applyAgentStyle` + `.xterm-instance.is-agy`）**：严格仅对 `sessionAgent === 'agy'` 的终端实例生效，Claude Code 与裸 shell 首行幂等跳过、零触碰（且因 `lineHeight` 不同，xterm WebGL 自动分配独立 `TextureAtlas` 不与 Claude 标签共享）：
+  1. **行距舒展**：`lineHeight` 从 `1.2` 提升至 `1.42`（不动 `letterSpacing`，确保 `─` 分割框线不断裂；宽度保持全宽铺满不裁边）
+  2. **垫图柔暗提清**：仅在前台为 `.is-agy` 且开启了背景垫图时，给宿主叠加 28% 内阴影压暗高光背景，提高 `agy` 细碎思考灰字的可读性
+
 ## 已知限制
 
 - xterm canvas 渲染与 CoreText 存在先天字形差异，字重 500 追回约九成观感

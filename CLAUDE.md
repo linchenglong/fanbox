@@ -33,7 +33,7 @@ grep -an "==== 二开" server.js public/app.js public/style.css electron/main.js
 | tab 会话名标题 / 引擎标 / 置顶 | — | `syncSessTabTitles`、`.tab-agent-ic`、`adoptByHost`（反向认领）、`togglePinSession`（⋯ 菜单） |
 | 输入框 ↑/↓ 边界移动 | — | app.js `arrowBoundary`（屏读判定，注意 NBSP 与 alt-screen 坑） |
 | 蓝莓皮肤 Adeberry | — | `[data-theme="adeberry"]`（色值源自 Warp 官方） |
-| 终端字体/垫图/滚速 | — | `term.setFont`/`term.setBg`、host capture 滚轮接管（TUI 走 SGR 上报合成）、⚙ 设置面板 |
+| 终端字体/垫图/滚速 / agy 专版优化 | — | `term.setFont`/`term.setBg`、滚轮接管、`term.applyAgentStyle` + `.is-agy`（仅 `agy` 行高 1.42 + 垫图柔暗） |
 | tab 拖拽排序 | — | renderTabs 内 HTML5 drag（x-fanbox-tab 类型隔离文件投喂） |
 | 选图对话框桥 | electron `ui:pick-image` | `window.fanboxUi.pickImage` |
 

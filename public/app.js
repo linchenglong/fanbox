@@ -4049,7 +4049,12 @@ const term = {
       if (cur && !cur.dead && await this.isPlainShell(cur)) sess = cur;
     }
     if (!sess) sess = await this.openInDir(state.cwd); // 等 spawn 完，拿确切 session 写入
-    if (sess && !sess.dead) { this.input(sess.id, cmd + '\r'); sess.xterm.focus(); toast('已在终端启动 ' + cmd); }
+    if (sess && !sess.dead) {
+      // ==== 二开: cockpit ==== 顶栏一键启动按钮也即时标记引擎，使 agy 第 0 帧即套用专版排版与图标
+      if (/^agy(\s|$)/.test(String(cmd || '').trim())) { sess.sessionAgent = 'agy'; sess.claudeProj = sess.cwd || sess.startDir || state.cwd; sess.sessSpawnT = Date.now(); this.renderTabs(); }
+      else if (/^claude(x)?(\s|$)/.test(String(cmd || '').trim())) { sess.sessionAgent = 'claude'; sess.claudeProj = sess.cwd || sess.startDir || state.cwd; sess.sessSpawnT = Date.now(); this.renderTabs(); }
+      this.input(sess.id, cmd + '\r'); sess.xterm.focus(); toast('已在终端启动 ' + cmd);
+    }
     else toast('终端启动失败', true);
   },
   // 在指定目录新开标签跑命令（续会话/发版等）：不复用别处的空闲 shell，目录必须对
@@ -4830,6 +4835,7 @@ const term = {
         const st = info && SESS_STATUS[info.status];
         if (st) { dotState = st.cls; dotTitle = st.label; }
       }
+      this.applyAgentStyle(s, sessAg);
       const followed = follow.on && follow.sid === s.id; // 文件跟随正盯着这个 tab
       t.className = 'term-tab' + (s.id === this.active ? ' active' : '') + (s.unread ? ' unread' : '') + (followed ? ' following' : '');
       // 终端图标按项目路径染色：同项目同色，和面包屑的配对色点呼应；挂了 agent 会话则直接展示 Claude / Antigravity 图标
@@ -4878,6 +4884,21 @@ const term = {
   },
   // 换主题后 WebGL 图集里缓存的还是旧配色字形，且 CJK 宽字符偶发图集损坏（#37/#45）：清一次图集强制重栅格化。
   // try/catch 兜住 GPU 故障，别让单个 session 的渲染异常连累其它 session 或拖垮渲染进程（#35）。
+  // ==== 二开: agy 专版舒适阅读排版（仅作用于 agy 会话：行高 1.42 + 版心居中留白 + 垫图柔暗；Claude Code 零触碰）====
+  applyAgentStyle(s, agentHint) {
+    if (!s || !s.xterm || !s.host) return;
+    const isAgy = !s.dead && (agentHint || s.sessionAgent) === 'agy';
+    if (!!s._agyStyled === isAgy) return; // 幂等：Claude Code / 裸 shell 首行即退，完全不碰 xterm 配置与图集
+    s._agyStyled = isAgy;
+    s.host.classList.toggle('is-agy', isAgy);
+    try {
+      s.xterm.options.lineHeight = isAgy ? 1.42 : 1.2;
+      s.webgl?.clearTextureAtlas?.();
+    } catch { /* */ }
+    if (s.id === this.active && s.fit) {
+      requestAnimationFrame(() => { try { s.fit.fit(); } catch { /* */ } });
+    }
+  },
   retheme() { const th = this.effTheme(); this.sessions.forEach((s) => { try { s.xterm.options.theme = th; s.webgl?.clearTextureAtlas?.(); } catch { /* */ } }); },
 };
 
