@@ -142,15 +142,22 @@
 ### 18. v1.5.0 Antigravity (`agy`) 专版阅读优化（324bd83, 044c322）
 
 - **问题**：`agy` TUI 块间不留空行，在 `lineHeight: 1.2` 下上下紧贴，且思考灰字易被亮色背景垫图干扰
-- **专版隔离实现（`term.applyAgentStyle` + `.xterm-instance.is-agy`）**：严格仅对 `sessionAgent === 'agy'` 的终端实例生效，Claude Code 与裸 shell 首行幂等跳过、零触碰（且因 `lineHeight` 不同，xterm WebGL 自动分配独立 `TextureAtlas` 不与 Claude 标签共享）：
+- **专版隔离实现（`term.applyAgentStyle` + `.xterm-instance.is-agy`）**：严格仅对 `sessionAgent` 为 `agy`（及后续 `devin`）的终端实例生效，Claude Code 与裸 shell 首行幂等跳过、零触碰（且因 `lineHeight` 不同，xterm WebGL 自动分配独立 `TextureAtlas` 不与 Claude 标签共享）：
   1. **行距舒展**：`lineHeight` 从 `1.2` 提升至 `1.42`（不动 `letterSpacing`，确保 `─` 分割框线不断裂；宽度保持全宽铺满不裁边）
-  2. **垫图柔暗提清**：仅在前台为 `.is-agy` 且开启了背景垫图时，给宿主叠加 28% 内阴影压暗高光背景，提高 `agy` 细碎思考灰字的可读性
+  2. **垫图柔暗提清**：仅在前台为 `.is-agy` 且开启了背景垫图时，给宿主叠加 28% 内阴影压暗高光背景，提高细碎思考灰字的可读性
+
+### 19. v1.6.0 Devin CLI (`devin`) 三引擎驾驶舱接入 + 同款阅读优化（1de39ad）
+
+- **配套 `~/bin/devin` 最高权限启动器**：探测 `~/.local/bin/devin` 与 `/Applications/Devin.app/.../bin/devin`；办公网自动挂接 `HTTP_PROXY` + 内网 `NO_PROXY`（离网直连不卡死）；校验 `~/.local/share/devin/credentials.toml` 登录态（缺失自动引导 `devin auth login`）；对非管理子命令默认注入 `--permission-mode dangerous --respect-workspace-trust false`（`agent_mode="bypass"` 全工具免审批 + 免新目录信任拦截），并在 `~/.config/devin/config.json` 同步固化 `permission_mode: "dangerous"`、`skip_workspace_trust: true`、`skip_home_directory_warning: true`
+- **三引擎同树混排与 WAL 缓存**：`listDevinSessions` 读取 `~/.local/share/devin/cli/sessions.db`（`hidden = 0`，秒级时间戳转毫秒，标题取 `title > prompt_history > 首条用户输入`，共用 `sqliteDbSig` 校验 `.db + .db-wal` 零成本命中缓存），与 Claude Code、Antigravity 按 `lastT` 降序同树混排
+- **探活、防双开与四态对齐**：活着的 `devin acp` 子进程持有 `~/.local/share/devin/cli/session_locks/<slug>.lock` 打开句柄；`liveDevinSessions` 用 `pgrep -x devin` + `lsof` 定向反查 `<slug> → pid`，`sessionHost` 读子进程及父进程 REPL 的 `FANBOX_TERM_ID` 完成本地 tab 配对与外部终端防双开；`decideDevinSessionStatus` 结合末条有效消息与 `tool_call_state` 未完结工具判定 `waiting`（`ask_user_question`）/ `running` / `done`
+- **原模型续接与同款舒适排版（含动态行高 WebGL 花屏根治）**：读取 `~/.config/devin/config.json` 默认 `agent.model`，仅非默认模型会话追加 `--model '<model>'`（默认模型走裸 `devin -r {id}`）；内置官方矢量图标 `/assets/agents/devin.svg`、项目行 `＋` 三选一新建菜单与顶栏 `AGENT_REGISTRY` 一键启动按钮；终端实例与 Antigravity 共用 `term.applyAgentStyle`（`lineHeight: 1.42` + `.is-agy` 垫图 28% 柔暗；切换 `lineHeight` 时完整 `dispose` 并重装该标签的 `WebglAddon`——修复 xterm `_handleOptionsChanged` 漏调 `GlyphRenderer.setDimensions` 引发的顶点/贴图错位花屏，同时保留 WebGL 逐格绝对坐标绘制，避免 DOM 渲染器 `letter-spacing` 导致的打字松散与行尾裁字）
 
 ## 已知限制
 
 - xterm canvas 渲染与 CoreText 存在先天字形差异，字重 500 追回约九成观感
 - `npm run dist` 需先改掉 package.json 里原作者的签名配置（`identity`/`notarize`/`appId`）
-- Codex/kimi/opencode 的会话不进侧栏（只做 Claude Code + Antigravity）
+- Codex/kimi/opencode 的会话不进侧栏（只做 Claude Code + Antigravity + Devin）
 - `projectMemory`（项目记忆页，上游代码）仍按目录名读会话，汉字撞车的目录里会混入别的项目的会话——二开只修了侧栏
 
 ## 验证方式（历次实测手段）

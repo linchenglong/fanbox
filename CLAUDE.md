@@ -26,22 +26,22 @@ grep -an "==== 二开" server.js public/app.js public/style.css electron/main.js
 | cockpit 布局（隐藏文件区） | — | app.js `applyCockpit`/`fbCockpit`，style.css `#app.cockpit` |
 | 按 tab 隔离的终端右侧文件预览 | `/api/locate`（附带单文件 `entry`） | `cockpitPreview`（`s.cockpitFile` 随 `term.activate` 切换）、`#term-body` 右侧挂载 `#preview`、`openTermPath`（含 `file://` 与 `:line` 跳行） |
 | Office 三件套原地预览 | `/api/office`（OOXML `zlib` 直解 + LibreOffice PDF 缓存 + `textutil`/`xlrd` 兜底） | `renderOfficePreview`（Excel 多 Sheet 表 / Word 富文本含图 / PPT 原版 PDF·卡片流） |
-| 原模型记忆续接 / 重启自动恢复 tab | `parseClaudeSession` & `agyConvMeta` + `readDefaultAgentModels`（默认模型置空 `resumeModel`） | `buildSessionResumeCmd`（仅非默认模型拼 `--model '...'`，默认模型走裸续接）、`persistTabs`/`restore` |
-| 侧栏双引擎 session 列表 | `/api/agent-sessions`（Claude jsonl + Agy SQLite）、`/api/session-name` | app.js `loadAgentProjects`/`sessLi`/`openSession`、引擎图标 `.sess-agent-ic` |
-| 四态状态圆点（侧栏+tab 同源） | `decideSessionStatus`（Claude）/ `decideAgySessionStatus`（Agy） | `SESS_STATUS`、`.sess-dot.st-*`、`.tab-dot.st-*` |
-| open 探活 / 防双开 | `liveClaudeSessionIds`、`liveAgySessions`（presence 锁）、`/api/session-host` | `refreshSessionOpenState`、`openSession` 三级判定 |
+| 原模型记忆续接 / 重启自动恢复 tab | `parseClaudeSession` & `agyConvMeta` & `listDevinSessions` + `readDefaultAgentModels`（默认模型置空 `resumeModel`） | `buildSessionResumeCmd`（仅非默认模型拼 `--model '...'`，默认模型走裸续接）、`persistTabs`/`restore` |
+| 侧栏三引擎 session 列表 | `/api/agent-sessions`（Claude jsonl + Agy SQLite + Devin SQLite）、`/api/session-name` | app.js `loadAgentProjects`/`sessLi`/`openSession`、引擎图标 `.sess-agent-ic` |
+| 四态状态圆点（侧栏+tab 同源） | `decideSessionStatus`（Claude）/ `decideAgySessionStatus`（Agy）/ `decideDevinSessionStatus`（Devin） | `SESS_STATUS`、`.sess-dot.st-*`、`.tab-dot.st-*` |
+| open 探活 / 防双开 | `liveClaudeSessionIds`、`liveAgySessions`、`liveDevinSessions`（`session_locks`）、`/api/session-host` | `refreshSessionOpenState`、`openSession` 三级判定 |
 | tab 会话名标题 / 引擎标 / 置顶 | — | `syncSessTabTitles`、`.tab-agent-ic`、`adoptByHost`（反向认领）、`togglePinSession`（⋯ 菜单） |
 | 输入框 ↑/↓ 边界移动 | — | app.js `arrowBoundary`（屏读判定，注意 NBSP 与 alt-screen 坑） |
 | 蓝莓皮肤 Adeberry | — | `[data-theme="adeberry"]`（色值源自 Warp 官方） |
-| 终端字体/垫图/滚速 / agy 专版优化 | — | `term.setFont`/`term.setBg`、滚轮接管、`term.applyAgentStyle` + `.is-agy`（仅 `agy` 行高 1.42 + 垫图柔暗） |
+| 终端字体/垫图/滚速 / agy·devin 专版优化 | — | `term.setFont`/`term.setBg`、滚轮接管、`term.applyAgentStyle` + `.is-agy`（仅 `agy`/`devin` 行高 1.42 + 垫图柔暗） |
 | tab 拖拽排序 | — | renderTabs 内 HTML5 drag（x-fanbox-tab 类型隔离文件投喂） |
 | 选图对话框桥 | electron `ui:pick-image` | `window.fanboxUi.pickImage` |
 
 ## 配置键速查
 
-- `~/.fanbox/config.json`：`sessionResumeCmd`（默认 `claudex -r {id}`）、`sessionNewCmd`（默认 `claudex`）、`agyResumeCmd`（默认 `agy --conversation {id}`）、`agyNewCmd`（默认 `agy`）、`sessionNames`（改名 map）、`sessionActiveWindowMs`（running 活跃窗，默认 60000）
+- `~/.fanbox/config.json`：`sessionResumeCmd`（默认 `claudex -r {id}`）、`sessionNewCmd`（默认 `claudex`）、`agyResumeCmd`（默认 `agy --conversation {id}`）、`agyNewCmd`（默认 `agy`）、`devinResumeCmd`（默认 `devin -r {id}`）、`devinNewCmd`（默认 `devin`）、`sessionNames`（改名 map）、`sessionActiveWindowMs`（running 活跃窗，默认 60000）
 - localStorage：`fb_cockpit`、`fb_cockpit_pvw`（终端右侧预览宽）、`fb_term_tabs`（含会话 ID/引擎/非默认模型/右侧文件的恢复快照）、`fb_term_font`（默认 PT Mono）、`fb_term_fontsize`（默认 18）、`fb_term_fontweight`（默认 500）、`fb_term_scroll`（滚速 1-15，默认 3）、`fb_term_bgimg`/`fb_term_bgmask`（垫图）、`fb_sess_pinned`（置顶）
-- 仓库外配套脚本（`~/bin/`）：`fanbox`（启停器，含 CDP 9223 + 清污染环境 + 修 spawn-helper）、`claudex`、`agy`（封装代理并默认对非管理子命令注入 `--dangerously-skip-permissions`）
+- 仓库外配套脚本（`~/bin/`）：`fanbox`（启停器，含 CDP 9223 + 清污染环境 + 修 spawn-helper）、`claudex`、`agy`（默认注入 `--dangerously-skip-permissions`）、`devin`（自适应内网代理 + 登录态兜底 + 默认注入 `--permission-mode dangerous --respect-workspace-trust false`）
 
 ## 踩坑警示（违反必翻车）
 
