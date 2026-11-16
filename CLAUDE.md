@@ -31,7 +31,7 @@ grep -an "==== 二开" server.js public/app.js public/style.css electron/main.js
 | 四态状态圆点（侧栏+tab 同源） | `decideSessionStatus`（Claude）/ `decideAgySessionStatus`（Agy）/ `decideDevinSessionStatus`（Devin） | `SESS_STATUS`、`.sess-dot.st-*`、`.tab-dot.st-*` |
 | open 探活 / 防双开 | `liveClaudeSessionIds`、`liveAgySessions`、`liveDevinSessions`（`session_locks`）、`/api/session-host` | `refreshSessionOpenState`、`openSession` 三级判定 |
 | tab 会话名标题 / 引擎标 / 置顶 | — | `syncSessTabTitles`、`.tab-agent-ic`、`adoptByHost`（反向认领）、`togglePinSession`（⋯ 菜单） |
-| 输入框 ↑/↓ 边界移动 | — | app.js `arrowBoundary`（屏读判定，注意 NBSP 与 alt-screen 坑） |
+| 输入框 ↑/↓ 边界移动 & 点击落光标 | — | app.js `locateInputBox`/`arrowBoundary`/`bindInputClick`（三引擎 `❯`/`❭`/`>` + 顶底边框夹持 + 剔除暗灰 Placeholder + 点击闭环定位） |
 | 蓝莓皮肤 Adeberry | — | `[data-theme="adeberry"]`（色值源自 Warp 官方） |
 | 终端字体/垫图/滚速 / agy·devin 专版优化 | — | `term.setFont`/`term.setBg`、滚轮接管、`term.applyAgentStyle` + `.is-agy`（仅 `agy`/`devin` 行高 1.42 + 垫图柔暗） |
 | tab 拖拽排序 | — | renderTabs 内 HTML5 drag（x-fanbox-tab 类型隔离文件投喂） |
