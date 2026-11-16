@@ -153,6 +153,13 @@
 - **探活、防双开与四态对齐**：活着的 `devin acp` 子进程持有 `~/.local/share/devin/cli/session_locks/<slug>.lock` 打开句柄；`liveDevinSessions` 用 `pgrep -x devin` + `lsof` 定向反查 `<slug> → pid`，`sessionHost` 读子进程及父进程 REPL 的 `FANBOX_TERM_ID` 完成本地 tab 配对与外部终端防双开；`decideDevinSessionStatus` 结合末条有效消息与 `tool_call_state` 未完结工具判定 `waiting`（`ask_user_question`）/ `running` / `done`
 - **原模型续接与同款舒适排版（含动态行高 WebGL 花屏根治）**：读取 `~/.config/devin/config.json` 默认 `agent.model`，仅非默认模型会话追加 `--model '<model>'`（默认模型走裸 `devin -r {id}`）；内置官方矢量图标 `/assets/agents/devin.svg`、项目行 `＋` 三选一新建菜单与顶栏 `AGENT_REGISTRY` 一键启动按钮；终端实例与 Antigravity 共用 `term.applyAgentStyle`（`lineHeight: 1.42` + `.is-agy` 垫图 28% 柔暗；切换 `lineHeight` 时完整 `dispose` 并重装该标签的 `WebglAddon`——修复 xterm `_handleOptionsChanged` 漏调 `GlyphRenderer.setDimensions` 引发的顶点/贴图错位花屏，同时保留 WebGL 逐格绝对坐标绘制，避免 DOM 渲染器 `letter-spacing` 导致的打字松散与行尾裁字）
 
+### 20. v1.6.1 三引擎输入框 ↑/↓ 边界跳转与鼠标点击落光标（667221c）
+
+- **三引擎统一框体几何识别（`locateInputBox`）**：同时匹配 Claude Code（`❯`）、Devin CLI（`❭`）与 Antigravity（`>`）输入框首行 + 两格缩进续行 + **顶底双边框 `───` 夹持**（精准排除 `vim`/`less`/裸 shell 及无边框的 `> 1. Yes` 选项菜单，且不依赖 `claudeSessionId` 是否已落盘，新开第 0 秒即生效）
+- **空框暗灰 Placeholder 剔除**：单行空框且 `cursorX <= 2` 时，通过单元格 `!isFgDefault() || isDim()` 识别 `Ask Devin...` 等灰色占位提示词（真实输入文字均为默认前景色），避免把占位符误算作有效行长
+- **↑/↓ 边界先归位再翻历史（`arrowBoundary`）**：三引擎统一支持——首行不在 `col 2` 时按 `↑` 先发 `\x01`（Ctrl+A）归首，末行不在真实 `eol` 时按 `↓` 先发 `\x05`（Ctrl+E）归尾，已在边界才放行原生键翻历史
+- **鼠标点击输入框指哪打哪（`bindInputClick` + `rowMoveSeq`）**：左键单击输入框（过滤拖拽选词、修饰键、上滚翻阅历史及 `.xterm-cursor-pointer` 文件路径链接）按 `.xterm-screen` 单元格网格定位：同行逐格识别 CJK 双宽字符并按半字吸附直接补发 `←`/`→`；跨行采用「先发 `↑`/`↓` 切到目标视觉行 → `onWriteParsed` 读取真实硬件落点列 → 再补水平 `←`/`→`」两段闭环，兼容硬换行与软折行零误差
+
 ## 已知限制
 
 - xterm canvas 渲染与 CoreText 存在先天字形差异，字重 500 追回约九成观感
