@@ -4379,7 +4379,7 @@ const term = {
         if (e.type === 'keydown') term.input(sess.id, '\x1b\r');
         return false;
       }
-      // ==== 二开: claude 输入框 ↑/↓ 边界增强 ==== 首/末行不在行首/行尾时先到行首/行尾，再按才翻历史
+      // ==== 二开: 三引擎输入框 ↑/↓ 边界增强（Claude Code + Antigravity + Devin）==== 首/末行不在行首/行尾时先到行首/行尾，再按才翻历史
       if (!cmd && !e.altKey && !e.shiftKey && !e.isComposing && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
         const seq = term.arrowBoundary(sess, xterm, e.key);
         if (seq) {
@@ -4402,6 +4402,9 @@ const term = {
       }
       return true;
     });
+
+    // ==== 二开: 点击终端输入框任意位置移动光标（覆盖 Claude Code / Antigravity / Devin）====
+    this.bindInputClick(sess);
 
     // 右键菜单：复制/粘贴
     host.addEventListener('contextmenu', (e) => {
@@ -4716,42 +4719,146 @@ const term = {
       return t;
     } catch { return ''; }
   },
-  // ==== 二开: claude 输入框 ↑/↓ 边界增强 ====
-  // 原生行为：末行按 ↓ 不动；首行按 ↑ 直接翻历史。期望：首/末行但不在行首/行尾时，先到行首/行尾，
-  // 到了边界再按才翻历史。读屏判定（❯ 前缀 + ── 边框），返回要改发的序列（\x01=行首 \x05=行尾，
-  // claude 的 readline 快捷键），认不出的形态一律返回 false 放行原生键——最差退回原生行为
-  arrowBoundary(sess, xterm, key) {
-    if (!sess.claudeSessionId || sess.sessionAgent === 'agy') return false; // 只对挂 claude 会话的 tab 生效（agy 自带光标边界处理）
+  // ==== 二开: 三引擎输入框几何定位 + ↑/↓ 边界移动 + 鼠标点击落光标（Claude Code / Antigravity / Devin）====
+  // 三家 TUI 输入框同构：顶边框 `───` + 首行提示符（Claude `❯ ` / Devin `❭ ` / Agy `> `，正文均始于 col 2）
+  // + 续行两空格缩进 + 底边框 `───`，且硬件光标 (cursorX, cursorY) 实时跟随真实输入点。
+  // 顶底双边框夹持可 100% 排除 vim/less/裸 shell 以及无边框的 `> 1. Yes` 选项菜单。
+  locateInputBox(sess, xterm) {
+    if (!sess || sess.dead || !xterm) return null;
     const buf = xterm.buffer.active;
-    // 注意：claude TUI 本身就跑在 alternate screen，不能按 buf.type 排除 vim/less——
-    // 靠屏读特征（❯ 行 + 续行缩进 + 底边框）区分，vim/less 画不出这个组合
-    const abs = buf.baseY + buf.cursorY;
-    // claude 输入框的 ❯ 后缀与续行缩进用的是 NBSP（\xa0），归一化成普通空格再做前缀判断
+    const curY = buf.baseY + buf.cursorY;
+    const maxY = buf.baseY + xterm.rows - 1;
     const rowText = (y) => { const l = buf.getLine(y); return l ? l.translateToString(true).replace(/\xa0/g, ' ') : ''; };
-    const cur = rowText(abs);
-    const isBorder = (t) => /^[─╭╰]/.test(t.trimStart());
+    const isBorder = (t) => { const s = t.trimStart(); return /^[─━╭╰┌└]/.test(s) && /[─━]{8,}/.test(s); };
+    const isHead = (t) => t === '❯' || t === '❭' || t === '>' || /^[❯❭>] /.test(t);
+    let startY = curY;
+    for (let guard = 0; startY >= buf.baseY && !isHead(rowText(startY)); startY--, guard++) {
+      if (guard > 30) return null;
+      const t = rowText(startY);
+      if (isBorder(t) || (t !== '' && !t.startsWith('  '))) return null;
+    }
+    if (startY < buf.baseY || startY === 0 || !isBorder(rowText(startY - 1))) return null;
+    let endY = curY;
+    for (let guard = 0; endY <= maxY && !isBorder(rowText(endY + 1)); endY++, guard++) {
+      if (guard > 30) return null;
+      const nt = rowText(endY + 1);
+      if (nt !== '' && !nt.startsWith('  ')) return null;
+    }
+    if (endY > maxY || !isBorder(rowText(endY + 1))) return null;
+    // 空输入框时 Devin/Claude 常在 col>=2 渲染暗灰 Placeholder（如 "Ask Devin..."，isFgDefault()=false 或 isDim()=true）
+    const isPlaceholder = (y) => {
+      if (startY !== endY || y !== startY || buf.cursorX > 2) return false;
+      const ln = buf.getLine(y);
+      const c2 = ln && ln.getCell(2);
+      if (!c2 || !c2.getChars().replace(/\xa0/g, ' ').trim()) return true;
+      return !!(c2.isDim() || !c2.isFgDefault());
+    };
+    const eol = (y) => {
+      if (isPlaceholder(y)) return 2;
+      const ln = buf.getLine(y);
+      let end = 2;
+      for (let x = Math.min(xterm.cols, ln ? ln.length : 0) - 1; x >= 2; x--) {
+        const c = ln.getCell(x);
+        if (c && c.getChars().replace(/\xa0/g, ' ').trim()) { end = Math.max(2, x + (c.getWidth() || 1)); break; }
+      }
+      return y === curY ? Math.max(end, buf.cursorX) : end;
+    };
+    return { buf, curY, startY, endY, eol, isPlaceholder };
+  },
+  arrowBoundary(sess, xterm, key) {
+    const box = this.locateInputBox(sess, xterm);
+    if (!box) return false;
     if (key === 'ArrowUp') {
-      if (!cur.startsWith('❯')) return false; // 光标不在输入框首行（含压根不在输入框）：放行
-      return buf.cursorX > 2 ? '\x01' : false; // 行首=「❯ 」之后的第 2 列，已在行首才翻历史
+      if (box.curY !== box.startY) return false; // 多行输入不在首行：放行原生 ↑ 上移一行
+      return box.buf.cursorX > 2 ? '\x01' : false; // 首行不在行首 → Ctrl+A 到最前；已在最前 → 放行翻历史
     }
-    // ArrowDown：光标行须属于输入框（本行是 ❯ 行，或向上能追溯到 ❯ 行），且下一行是底边框 → 末行。
-    // 续行（含输入框里的空行）统一带两空格缩进前缀，非 "  " 开头即出框（translateToString(true)
-    // 只裁行尾空白，前导缩进保得住；输入框外的真空行是 ''，自然终止追溯）
-    let y = abs;
-    while (y >= 0 && !rowText(y).startsWith('❯')) {
-      if (!rowText(y).startsWith('  ')) return false;
-      y--;
+    if (box.curY !== box.endY) return false; // 多行输入不在末行：放行原生 ↓ 下移一行
+    return box.buf.cursorX < box.eol(box.endY) ? '\x05' : false; // 末行不在行尾 → Ctrl+E 到最后；已在最后 → 放行翻历史
+  },
+  // 同行内从 fromX 移到目标浮点列 floatCol 所需的方向键序列（逐格识别 CJK 双宽字符 + 半字吸附）
+  rowMoveSeq(xterm, y, eolCol, fromX, floatCol) {
+    const ln = xterm.buffer.active.getLine(y);
+    if (!ln) return '';
+    let targetX = 2;
+    if (floatCol >= eolCol) targetX = eolCol;
+    else if (floatCol > 2) {
+      let x = 2;
+      while (x < eolCol) {
+        const c = ln.getCell(x);
+        if (c && c.getWidth() === 0) { x++; continue; }
+        const w = Math.max(1, (c && c.getWidth()) || 1);
+        if (floatCol < x + w) { targetX = floatCol < x + w * 0.5 ? x : x + w; break; }
+        x += w;
+      }
     }
-    if (y < 0) return false;
-    if (!isBorder(rowText(abs + 1))) return false; // 下一行不是底边框：不是末行，放行原生 ↓
-    // 行尾 = 最后一个非空单元格的右缘（CJK 宽字符占 2 列，getWidth 补齐）
-    const line = buf.getLine(abs);
-    let eol = 0;
-    for (let x = Math.min(xterm.cols, line ? line.length : 0) - 1; x >= 0; x--) {
-      const c = line.getCell(x);
-      if (c && c.getChars().trim()) { eol = x + (c.getWidth() || 1); break; }
+    if (targetX === fromX) return '';
+    const lo = Math.min(fromX, targetX), hi = Math.max(fromX, targetX);
+    let steps = 0;
+    for (let x = lo; x < hi;) {
+      const c = ln.getCell(x);
+      if (c && c.getWidth() === 0) { x++; continue; }
+      steps++;
+      x += Math.max(1, (c && c.getWidth()) || 1);
     }
-    return buf.cursorX < eol ? '\x05' : false; // 已在行尾才翻历史
+    if (!steps) return '';
+    const pre = xterm.modes.applicationCursorKeysMode ? '\x1bO' : '\x1b[';
+    return (pre + (targetX < fromX ? 'D' : 'C')).repeat(steps);
+  },
+  bindInputClick(sess) {
+    if (!sess || !sess.host || sess._inputClickBound) return;
+    sess._inputClickBound = true;
+    let down = null;
+    sess.host.addEventListener('mousedown', (ev) => {
+      if (ev.button !== 0 || ev.altKey || ev.metaKey || ev.shiftKey || ev.ctrlKey) { down = null; return; }
+      down = { x: ev.clientX, y: ev.clientY, t: Date.now() };
+    }, true);
+    sess.host.addEventListener('mouseup', (ev) => {
+      const d = down; down = null;
+      if (!d || ev.button !== 0 || ev.altKey || ev.metaKey || ev.shiftKey || ev.ctrlKey) return;
+      if (Math.hypot(ev.clientX - d.x, ev.clientY - d.y) > 5 || Date.now() - d.t > 600) return; // 拖拽选词或长按：放行
+      const xterm = sess.xterm;
+      if (!xterm || sess.dead || xterm.hasSelection()) return;
+      if (sess.host.querySelector('.xterm-cursor-pointer')) return; // 正点在可跳转的文件路径链接上：让链接优先
+      const buf = xterm.buffer.active;
+      if (buf.viewportY !== buf.baseY) return; // 正在上滚翻看历史输出：不移动底部光标
+      const box = this.locateInputBox(sess, xterm);
+      if (!box) return;
+      const scr = (sess.host.querySelector('.xterm-screen') || sess.host).getBoundingClientRect();
+      if (!scr.width || !scr.height || !xterm.cols || !xterm.rows) return;
+      const clickRow = Math.floor((ev.clientY - scr.top) / (scr.height / xterm.rows));
+      const floatCol = (ev.clientX - scr.left) / (scr.width / xterm.cols);
+      if (clickRow < 0 || clickRow >= xterm.rows) return;
+      const targetY = buf.baseY + clickRow;
+      if (targetY < box.startY || targetY > box.endY) return; // 点击在输入框外：不处理
+      if (sess._clickMoveCancel) { sess._clickMoveCancel(); sess._clickMoveCancel = null; }
+      if (box.isPlaceholder(targetY)) return; // 空输入框已在 col 2，无需发键
+      // ① 同行点击：直接按宽窄字符差瞬移到位
+      if (targetY === box.curY) {
+        const seq = this.rowMoveSeq(xterm, targetY, box.eol(targetY), buf.cursorX, floatCol);
+        if (seq) this.input(sess.id, seq);
+        return;
+      }
+      // ② 跨行点击：先发 ↑/↓ 让 CLI 切到目标视觉行，等重绘回执拿到真实落点列后再补水平 ←/→（闭环零误差，兼容硬换行与软折行）
+      const pre = xterm.modes.applicationCursorKeysMode ? '\x1bO' : '\x1b[';
+      const vSeq = (pre + (targetY < box.curY ? 'A' : 'B')).repeat(Math.abs(targetY - box.curY));
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        const curAbs = xterm.buffer.active.baseY + xterm.buffer.active.cursorY;
+        if (curAbs !== targetY) return;
+        done = true;
+        cleanup();
+        const latestBox = this.locateInputBox(sess, xterm);
+        const eolCol = latestBox ? latestBox.eol(targetY) : box.eol(targetY);
+        const hSeq = this.rowMoveSeq(xterm, targetY, eolCol, xterm.buffer.active.cursorX, floatCol);
+        if (hSeq) this.input(sess.id, hSeq);
+      };
+      const disp = xterm.onWriteParsed ? xterm.onWriteParsed(finish) : null;
+      const timer = setTimeout(() => { done = true; cleanup(); }, 220);
+      function cleanup() { clearTimeout(timer); if (disp && disp.dispose) disp.dispose(); if (sess._clickMoveCancel === cleanup) sess._clickMoveCancel = null; }
+      sess._clickMoveCancel = cleanup;
+      this.input(sess.id, vSeq);
+    }, true);
   },
   // 轮到你了：终端边缘呼吸几秒，余光可感（agent 干完一段、把球踢回给你）
   awaitGlow() {
