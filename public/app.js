@@ -2119,12 +2119,13 @@ function agoShort(ms) {
   if (m < 1440) return Math.round(m / 60) + ' 时';
   return Math.round(m / 1440) + ' 天';
 }
-// ==== 二开: cockpit —— Agent 项目 → Claude Code + Antigravity session 列表 ====
-// 侧栏在同一项目目录树下混排 Claude Code 与 Antigravity 会话（按最后活跃降序），靠官方小图标区分引擎。
+// ==== 二开: cockpit —— Agent 项目 → Claude Code + Antigravity + Devin session 列表 ====
+// 侧栏在同一项目目录树下混排 Claude Code、Antigravity 与 Devin 会话（按最后活跃降序），靠官方小图标区分引擎。
 // 点击 session：已开 tab → 切过去；没开 → 按会话所属引擎在项目目录新开 tab 自动续接（命令模板存 config.json）。
 const SESS_AGENTS = {
   claude: { label: 'Claude Code', short: 'Claude', icon: '/assets/agents/claude.svg' },
   agy: { label: 'Antigravity', short: 'Antigravity', icon: '/assets/agents/agy.svg' },
+  devin: { label: 'Devin CLI', short: 'Devin', icon: '/assets/agents/devin.svg' },
 };
 const sessAgentMeta = (agent) => SESS_AGENTS[agent] || SESS_AGENTS.claude;
 
@@ -2133,6 +2134,8 @@ const sessUI = {
   newCmd: 'claudex',
   agyResumeCmd: 'agy --conversation {id}',
   agyNewCmd: 'agy',
+  devinResumeCmd: 'devin -r {id}',
+  devinNewCmd: 'devin',
   projects: [],
   showAll: new Set(),    // 点过「还有 N 个」的项目
   collapsed: new Set(),  // 收起了整个会话列表的项目
@@ -2146,7 +2149,7 @@ const sessDisplayName = (s) => s.name || s.title || '（无标题会话）';
 // 统一构建续接命令（侧栏点击续接 + 重启自动恢复共用同一出口）：
 // 若会话记录了上次使用的模型且模板未硬编码 --model，则单引号安全包裹追加 --model（防 zsh 将 [1m] 或括号当通配符/语法报错）
 function buildSessionResumeCmd(agent, sid, model) {
-  const tpl = agent === 'agy' ? sessUI.agyResumeCmd : sessUI.resumeCmd;
+  const tpl = agent === 'agy' ? sessUI.agyResumeCmd : (agent === 'devin' ? sessUI.devinResumeCmd : sessUI.resumeCmd);
   let cmd = tpl.replace('{id}', sid);
   if (model && !/(?:^|\s)--model(?:\s|=)/.test(cmd)) {
     cmd += ` --model '${String(model).replace(/'/g, `'\\''`)}'`;
@@ -2198,6 +2201,8 @@ async function loadAgentProjects() {
   sessUI.newCmd = data.newCmd || sessUI.newCmd;
   sessUI.agyResumeCmd = data.agyResumeCmd || sessUI.agyResumeCmd;
   sessUI.agyNewCmd = data.agyNewCmd || sessUI.agyNewCmd;
+  sessUI.devinResumeCmd = data.devinResumeCmd || sessUI.devinResumeCmd;
+  sessUI.devinNewCmd = data.devinNewCmd || sessUI.devinNewCmd;
   sessUI.projects = data.projects || [];
   // 置顶的排到各自项目最前（组内仍按 lastT 降序——服务端已排好，stable sort 保序）
   sessUI.projects.forEach((p) => p.sessions.sort((a, b) => (sessUI.pinned.has(b.id) ? 1 : 0) - (sessUI.pinned.has(a.id) ? 1 : 0)));
@@ -2218,7 +2223,7 @@ async function loadAgentProjects() {
 function renderSessionNav() {
   const ul = $('#agent-projects-list');
   ul.innerHTML = '';
-  if (!sessUI.projects.length) { ul.innerHTML = '<div class="nav-empty">用 Claude Code 或 Antigravity 跑过的项目会出现在这里</div>'; return; }
+  if (!sessUI.projects.length) { ul.innerHTML = '<div class="nav-empty">用 Claude Code、Antigravity 或 Devin 跑过的项目会出现在这里</div>'; return; }
   sessUI.projects.forEach((pj) => {
     const li = document.createElement('li');
     li.className = 'proj-li';
@@ -2248,12 +2253,13 @@ function renderSessionNav() {
     const add = document.createElement('span');
     add.className = 'proj-add';
     add.textContent = '＋';
-    add.title = `在 ${pj.name} 新建会话（Claude Code / Antigravity）`;
+    add.title = `在 ${pj.name} 新建会话（Claude Code / Antigravity / Devin）`;
     add.onclick = (ev) => {
       ev.stopPropagation();
       popupMenu(ev, [
         { label: '新建 Claude Code 会话', fn: () => launchNewSession(pj.path, 'claude') },
         { label: '新建 Antigravity 会话', fn: () => launchNewSession(pj.path, 'agy') },
+        { label: '新建 Devin 会话', fn: () => launchNewSession(pj.path, 'devin') },
       ]);
     };
     li.append(twirl, ico, label, when, add);
@@ -2412,7 +2418,7 @@ async function launchNewSession(projPath, agent = 'claude') {
   sess.sessionAgent = agent;
   sess.claudeProj = projPath;
   sess.sessSpawnT = Date.now();
-  const cmd = agent === 'agy' ? sessUI.agyNewCmd : sessUI.newCmd;
+  const cmd = agent === 'agy' ? sessUI.agyNewCmd : (agent === 'devin' ? sessUI.devinNewCmd : sessUI.newCmd);
   term.input(sess.id, cmd + '\r');
   sess.xterm.focus();
   term.renderTabs();
@@ -3005,8 +3011,9 @@ const wechatView = {
 //           没有 sessions 字段 = 该 agent 暂不支持会话回溯（服务端也没有对应适配器）
 const AGENT_REGISTRY = [
   { id: 'claude', label: 'Claude Code', cmd: 'claude --dangerously-skip-permissions', bin: 'claude', install: 'npm install -g @anthropic-ai/claude-code', sessions: { badge: 'C', resumeCmd: 'claude --dangerously-skip-permissions --resume {id}' } },
-  // ==== 二开: cockpit —— 内置 Google Antigravity (agy) 启动与续接注册 ====
+  // ==== 二开: cockpit —— 内置 Google Antigravity (agy) 与 Devin CLI 启动与续接注册 ====
   { id: 'agy', label: 'Antigravity', cmd: 'agy', bin: 'agy', install: 'https://antigravity.google/cli', sessions: { badge: 'A', resumeCmd: 'agy --conversation {id}' } },
+  { id: 'devin', label: 'Devin', cmd: 'devin', bin: 'devin', install: 'https://devin.ai/cli', sessions: { badge: 'D', resumeCmd: 'devin -r {id}' } },
   { id: 'codex', label: 'Codex', cmd: 'codex', bin: 'codex', install: 'npm install -g @openai/codex', sessions: { badge: '>_', resumeCmd: 'codex resume {id}' } },
   { id: 'hermes', label: 'Hermes Agent', cmd: 'hermes', bin: 'hermes', install: 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash' },
   { id: 'openclaw', label: 'OpenClaw', cmd: 'openclaw', bin: 'openclaw', install: 'npm install -g openclaw' },
@@ -4050,9 +4057,10 @@ const term = {
     }
     if (!sess) sess = await this.openInDir(state.cwd); // 等 spawn 完，拿确切 session 写入
     if (sess && !sess.dead) {
-      // ==== 二开: cockpit ==== 顶栏一键启动按钮也即时标记引擎，使 agy 第 0 帧即套用专版排版与图标
-      if (/^agy(\s|$)/.test(String(cmd || '').trim())) { sess.sessionAgent = 'agy'; sess.claudeProj = sess.cwd || sess.startDir || state.cwd; sess.sessSpawnT = Date.now(); this.renderTabs(); }
-      else if (/^claude(x)?(\s|$)/.test(String(cmd || '').trim())) { sess.sessionAgent = 'claude'; sess.claudeProj = sess.cwd || sess.startDir || state.cwd; sess.sessSpawnT = Date.now(); this.renderTabs(); }
+      // ==== 二开: cockpit ==== 顶栏一键启动按钮也即时标记引擎，使 agy / devin 第 0 帧即套用专版排版与图标
+      const trimCmd = String(cmd || '').trim();
+      const quickAg = /^agy(\s|$)/.test(trimCmd) ? 'agy' : (/^devin(\s|$)/.test(trimCmd) ? 'devin' : (/^claude(x)?(\s|$)/.test(trimCmd) ? 'claude' : ''));
+      if (quickAg) { sess.sessionAgent = quickAg; sess.claudeProj = sess.cwd || sess.startDir || state.cwd; sess.sessSpawnT = Date.now(); this.renderTabs(); }
       this.input(sess.id, cmd + '\r'); sess.xterm.focus(); toast('已在终端启动 ' + cmd);
     }
     else toast('终端启动失败', true);
@@ -4884,19 +4892,35 @@ const term = {
   },
   // 换主题后 WebGL 图集里缓存的还是旧配色字形，且 CJK 宽字符偶发图集损坏（#37/#45）：清一次图集强制重栅格化。
   // try/catch 兜住 GPU 故障，别让单个 session 的渲染异常连累其它 session 或拖垮渲染进程（#35）。
-  // ==== 二开: agy 专版舒适阅读排版（仅作用于 agy 会话：行高 1.42 + 版心居中留白 + 垫图柔暗；Claude Code 零触碰）====
+  // ==== 二开: agy / devin 专版舒适阅读排版（仅作用于 agy 与 devin 会话：行高 1.42 + 垫图柔暗；Claude Code 零触碰）====
+  // 踩坑根因：① xterm WebGL 的 _handleOptionsChanged 在动态改 lineHeight 时漏调了 GlyphRenderer.setDimensions，
+  // 只调 clearTextureAtlas 会拿旧 24px 顶点框切新 28px 图集导致整屏花屏乱码；② 若退回 DOM 渲染器，xterm 会给汉字强塞
+  // letter-spacing:3.6px/标点 12.3px 导致打字松散怪异，且流式弯引号累加超宽会裁掉行尾汉字。
+  // 正解：继续走 WebGL 绝对网格逐格绘制，但在切换 lineHeight 时完整 dispose 并重装该标签的 WebglAddon，从零对齐全部尺寸。
   applyAgentStyle(s, agentHint) {
     if (!s || !s.xterm || !s.host) return;
-    const isAgy = !s.dead && (agentHint || s.sessionAgent) === 'agy';
-    if (!!s._agyStyled === isAgy) return; // 幂等：Claude Code / 裸 shell 首行即退，完全不碰 xterm 配置与图集
-    s._agyStyled = isAgy;
-    s.host.classList.toggle('is-agy', isAgy);
+    const ag = agentHint || s.sessionAgent;
+    const isComfort = !s.dead && (ag === 'agy' || ag === 'devin');
+    if (!!s._agyStyled === isComfort) return; // 幂等：Claude Code / 裸 shell 首行即退，完全不碰 xterm 配置与图集
+    s._agyStyled = isComfort;
+    s.host.classList.toggle('is-agy', isComfort);
     try {
-      s.xterm.options.lineHeight = isAgy ? 1.42 : 1.2;
-      s.webgl?.clearTextureAtlas?.();
+      s.xterm.options.lineHeight = isComfort ? 1.42 : 1.2;
+      if (s.webgl) {
+        try { s.webgl.dispose(); } catch { /* */ }
+        s.webgl = null;
+        if (!window.__noWebgl && window.WebglAddon && localStorage.getItem('fanbox.noWebgl') !== '1') {
+          const Wg = window.WebglAddon.WebglAddon || window.WebglAddon;
+          const wg = new Wg();
+          wg.onContextLoss(() => { try { wg.dispose(); } catch { /* */ } if (s.webgl === wg) s.webgl = null; });
+          s.xterm.loadAddon(wg);
+          s.webgl = wg;
+          this.watchAtlas(wg);
+        }
+      }
     } catch { /* */ }
-    if (s.id === this.active && s.fit) {
-      requestAnimationFrame(() => { try { s.fit.fit(); } catch { /* */ } });
+    if (s.fit && s.host.classList.contains('show')) {
+      try { s.fit.fit(); } catch { /* */ }
     }
   },
   retheme() { const th = this.effTheme(); this.sessions.forEach((s) => { try { s.xterm.options.theme = th; s.webgl?.clearTextureAtlas?.(); } catch { /* */ } }); },

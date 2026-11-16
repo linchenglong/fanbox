@@ -799,14 +799,14 @@ async function liveClaudeSessionIds() {
   return ids;
 }
 
-// ==== 二开: cockpit —— 某个活会话跑在哪：FanBox 终端 id 或外部宿主（覆盖 Claude + Antigravity）====
+// ==== 二开: cockpit —— 某个活会话跑在哪：FanBox 终端 id 或外部宿主（覆盖 Claude + Antigravity + Devin）====
 // 点击已打开的 session 时前端要「切换到对应 tab」而不是再开一个。前端只认自己标记过的 tab，
-// 手动在 FanBox 终端里敲 claudex / agy 起的会话没有标记——靠 ps eww 读进程环境里的
+// 手动在 FanBox 终端里敲 claudex / agy / devin 起的会话没有标记——靠 ps eww 读进程环境里的
 // FANBOX_TERM_ID（pty:spawn 注入的）来配对；读不到 = 会话在 iTerm/Warp/Terminal 等外部宿主跑。
 async function sessionHost(sessId, agent = '') {
   if (!sessId) return { ok: true, open: false, termId: null };
   let pid = 0;
-  if (agent !== 'agy') {
+  if (!agent || agent === 'claude') {
     try {
       for (const n of await fsp.readdir(CLAUDE_SESS_REG)) {
         if (!n.endsWith('.json')) continue;
@@ -817,15 +817,27 @@ async function sessionHost(sessId, agent = '') {
       }
     } catch { /* */ }
   }
-  if (!pid && agent !== 'claude') {
+  if (!pid && (!agent || agent === 'agy')) {
     pid = (await liveAgySessions(true)).get(sessId) || 0;
   }
+  if (!pid && (!agent || agent === 'devin')) {
+    pid = (await liveDevinSessions(true)).get(sessId) || 0;
+  }
   if (!pid) return { ok: true, open: false, termId: null };
-  const envLine = await new Promise((resolve) => {
-    execFile('ps', ['eww', '-o', 'command=', '-p', String(pid)], { timeout: 3000 }, (err, out) => resolve(err ? '' : String(out || '')));
+  const readEnv = (p) => new Promise((resolve) => {
+    execFile('ps', ['eww', '-o', 'ppid=,command=', '-p', String(p)], { timeout: 3000 }, (err, out) => resolve(err ? '' : String(out || '')));
   });
+  const envLine = await readEnv(pid);
   if (!envLine) return { ok: true, open: false, termId: null }; // 进程已死（stale 注册表）
-  const m = envLine.match(/FANBOX_TERM_ID=(\w+)/);
+  let m = envLine.match(/FANBOX_TERM_ID=(\w+)/);
+  // devin 持锁的是子进程 `devin acp`，若子进程环境未检出则回溯父进程 REPL 兜底
+  if (!m) {
+    const ppid = Number((envLine.trim().split(/\s+/)[0]) || 0);
+    if (ppid > 1) {
+      const pLine = await readEnv(ppid);
+      if (pLine) m = pLine.match(/FANBOX_TERM_ID=(\w+)/);
+    }
+  }
   return { ok: true, open: true, termId: m ? m[1] : null }; // termId=null → 外部宿主（iTerm/Warp 等）
 }
 
@@ -984,6 +996,102 @@ async function decideAgySessionStatus(row, stepSt, activeWindowMs, now = Date.no
   if (row.rawStatus === 'CASCADE_RUN_STATUS_RUNNING' || row.rawStatus === 'CASCADE_RUN_STATUS_BUSY' || row.rawStatus === 'CASCADE_RUN_STATUS_CANCELING') return 'running';
   if ((stepSt === 1 || stepSt === 2 || stepSt === 8 || stepSt === 11) && now - row.lastT < activeWindowMs) return 'running';
   if (row.notFullyIdle) return 'background';
+  return 'done';
+}
+
+// ==== 二开: cockpit —— Devin CLI 会话索引、探活与四态判定 ====
+// 数据源：~/.local/share/devin/cli/sessions.db（SQLite WAL 权威索引，created_at/last_activity_at 为秒级时间戳）
+// 探活：活着的 `devin acp` 子进程持有 ~/.local/share/devin/cli/session_locks/<slug>.lock 打开 fd
+// 四态：末条非 system 消息角色/工具调用 + tool_call_state 未完成工具数（ask_user_question → waiting）
+const DEVIN_CLI_DIR = path.join(HOME, '.local', 'share', 'devin', 'cli');
+const DEVIN_SESS_DB = path.join(DEVIN_CLI_DIR, 'sessions.db');
+const DEVIN_CFG_FILE = path.join(HOME, '.config', 'devin', 'config.json');
+let devinSessCache = { sig: '', rows: [] };
+let liveDevinCache = { at: 0, map: new Map() };
+
+async function listDevinSessions() {
+  const sig = await sqliteDbSig(DEVIN_SESS_DB);
+  if (!sig) return [];
+  if (sig === devinSessCache.sig) return devinSessCache.rows;
+  const sql = `WITH base AS (
+      SELECT s.id, s.working_directory, s.model, s.created_at, s.last_activity_at, s.title, s.main_chain_id,
+        (SELECT mn.row_id FROM message_nodes mn
+          WHERE mn.session_id = s.id AND json_extract(mn.chat_message, '$.role') != 'system'
+          ORDER BY mn.row_id DESC LIMIT 1) AS tail_rid
+      FROM sessions s WHERE s.hidden = 0 ORDER BY s.last_activity_at DESC LIMIT 500
+    )
+    SELECT b.id, b.working_directory, b.model, b.created_at, b.last_activity_at, b.main_chain_id,
+      COALESCE(NULLIF(TRIM(b.title), ''),
+        (SELECT substr(ph.content, 1, 160) FROM prompt_history ph WHERE ph.session_id = b.id AND ph.is_shell = 0 ORDER BY ph.id ASC LIMIT 1),
+        (SELECT substr(json_extract(mn0.chat_message, '$.content'), 1, 160) FROM message_nodes mn0
+          WHERE mn0.session_id = b.id AND json_extract(mn0.chat_message, '$.role') = 'user'
+            AND json_extract(mn0.chat_message, '$.metadata.is_user_input') = 1 ORDER BY mn0.row_id ASC LIMIT 1)
+      ) AS eff_title,
+      (SELECT COUNT(*) FROM prompt_history ph WHERE ph.session_id = b.id AND ph.is_shell = 0) AS prompt_cnt,
+      (SELECT COUNT(*) FROM tool_call_state tcs WHERE tcs.session_id = b.id AND tcs.tool_call_update_json IS NULL) AS pending_tools,
+      json_extract(tm.chat_message, '$.role') AS last_role,
+      COALESCE(json_array_length(json_extract(tm.chat_message, '$.tool_calls')), 0) AS last_tool_cnt,
+      json_extract(tm.chat_message, '$.tool_calls[0].name') AS first_tool_name
+    FROM base b
+    LEFT JOIN message_nodes tm ON tm.row_id = b.tail_rid;`;
+  let raw;
+  try { raw = await querySqliteJson(DEVIN_SESS_DB, sql); } catch { return devinSessCache.rows; }
+  const rows = [];
+  for (const r of raw) {
+    const id = String(r.id || '').trim();
+    const cwd = String(r.working_directory || '').replace(/\/+$/, '') || '';
+    if (!id || !cwd) continue;
+    const title = String(r.eff_title || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    const promptCnt = Number(r.prompt_cnt) || 0;
+    const hasChain = r.main_chain_id !== null && r.main_chain_id !== undefined;
+    const userMsgs = promptCnt > 0 ? promptCnt : (hasChain && title ? 1 : 0);
+    if (!title && userMsgs <= 0) continue;
+    const sec = Number(r.last_activity_at) || Number(r.created_at) || 0;
+    const lastT = sec > 1e12 ? sec : sec * 1000;
+    rows.push({
+      id, cwd, title, userMsgs, lastT,
+      model: String(r.model || '').trim(),
+      pendingTools: Number(r.pending_tools) || 0,
+      lastRole: String(r.last_role || ''),
+      lastToolCnt: Number(r.last_tool_cnt) || 0,
+      firstToolName: String(r.first_tool_name || ''),
+    });
+  }
+  devinSessCache = { sig, rows };
+  return rows;
+}
+
+async function liveDevinSessions(force = false) {
+  if (!force && Date.now() - liveDevinCache.at < 5000) return liveDevinCache.map;
+  const pids = await new Promise((resolve) => {
+    execFile('pgrep', ['-x', 'devin'], { timeout: 2000 }, (err, out) => {
+      resolve(String(out || '').split('\n').map((s) => Number(s.trim())).filter(Boolean));
+    });
+  });
+  const map = new Map();
+  if (pids.length) {
+    const out = await new Promise((resolve) => {
+      execFile('/usr/sbin/lsof', ['-nP', '-a', '-p', pids.join(','), '-F', 'pn'], { timeout: 3000 }, (err, stdout) => {
+        resolve(String(stdout || ''));
+      });
+    });
+    let curPid = 0;
+    for (const line of out.split('\n')) {
+      if (line.startsWith('p')) curPid = Number(line.slice(1)) || 0;
+      else if (curPid && line.startsWith('n')) {
+        const m = line.match(/\/devin\/cli\/session_locks\/([A-Za-z0-9_-]+)\.lock$/);
+        if (m) map.set(m[1], curPid);
+      }
+    }
+  }
+  liveDevinCache = { at: Date.now(), map };
+  return map;
+}
+
+function decideDevinSessionStatus(row, activeWindowMs, now = Date.now()) {
+  if (row.firstToolName === 'ask_user_question' && (row.pendingTools > 0 || row.lastRole === 'assistant')) return 'waiting';
+  if (row.pendingTools > 0 && now - row.lastT < Math.max(activeWindowMs, 600000)) return 'running';
+  if ((row.lastRole === 'user' || row.lastRole === 'tool' || row.lastToolCnt > 0) && now - row.lastT < activeWindowMs) return 'running';
   return 'done';
 }
 
@@ -2790,8 +2898,8 @@ async function agentProjects(force = false) {
     cur.agents.add(agent);
     map.set(cwd, cur);
   };
-  // ==== 二开: cockpit ==== 收驾驶舱双引擎项目（Claude Code + Antigravity），Codex 项目不进侧栏；
-  // Claude 会话逐文件按头部 cwd 归属（防汉字名目录撞车），Antigravity 从索引库 workspace_uris 归属
+  // ==== 二开: cockpit ==== 收驾驶舱三引擎项目（Claude Code + Antigravity + Devin），Codex 项目不进侧栏；
+  // Claude 会话逐文件按头部 cwd 归属（防汉字名目录撞车），Antigravity / Devin 从各自索引库归属
   await Promise.all([
     (async () => {
       try {
@@ -2819,6 +2927,12 @@ async function agentProjects(force = false) {
         if (r.lastT >= cutoff) add(r.cwd, r.lastT, 'agy');
       }
     })(),
+    (async () => {
+      const devinRows = await listDevinSessions();
+      for (const r of devinRows) {
+        if (r.lastT >= cutoff) add(r.cwd, r.lastT, 'devin');
+      }
+    })(),
   ]);
   // 按最近活跃排序，已被删除的项目目录剔掉
   const sorted = [...map.entries()].sort((a, b) => b[1].lastActive - a[1].lastActive);
@@ -2833,15 +2947,17 @@ async function agentProjects(force = false) {
   return data;
 }
 
-// ==== 二开: cockpit —— 项目 → Claude + Antigravity 混合 session 列表（侧栏驾驶舱数据源）====
-// 同一目录树下合并两家会话，按最后活跃降序混排，靠 agent 字段标识引擎。自定义名与命令模板存 config.json。
+// ==== 二开: cockpit —— 项目 → Claude + Antigravity + Devin 混合 session 列表（侧栏驾驶舱数据源）====
+// 同一目录树下合并三家会话，按最后活跃降序混排，靠 agent 字段标识引擎。自定义名与命令模板存 config.json。
 const SESS_RESUME_DEFAULT = 'claudex -r {id}';
 const SESS_NEW_DEFAULT = 'claudex';
 const SESS_AGY_RESUME_DEFAULT = 'agy --conversation {id}';
 const SESS_AGY_NEW_DEFAULT = 'agy';
+const SESS_DEVIN_RESUME_DEFAULT = 'devin -r {id}';
+const SESS_DEVIN_NEW_DEFAULT = 'devin';
 
 async function readDefaultAgentModels() {
-  let claudeDef = '', agyDef = '';
+  let claudeDef = '', agyDef = '', devinDef = '';
   await Promise.all([
     fsp.readFile(path.join(HOME, '.claude', 'settings.json'), 'utf8').then((txt) => {
       const j = JSON.parse(txt);
@@ -2851,13 +2967,17 @@ async function readDefaultAgentModels() {
       const j = JSON.parse(txt);
       agyDef = String((j && j.model) || '').trim();
     }).catch(() => {}),
+    fsp.readFile(DEVIN_CFG_FILE, 'utf8').then((txt) => {
+      const j = JSON.parse(txt);
+      devinDef = String((j && j.agent && j.agent.model) || (j && j.model) || '').trim();
+    }).catch(() => {}),
   ]);
-  return { claudeDef, agyDef };
+  return { claudeDef, agyDef, devinDef };
 }
 
 async function agentSessions() {
-  const [projData, cfg, liveIds, agyLiveMap, agyRows, defModels] = await Promise.all([
-    agentProjects(), readConfig(), liveClaudeSessionIds(), liveAgySessions(), listAgySummaries(), readDefaultAgentModels(),
+  const [projData, cfg, liveIds, agyLiveMap, agyRows, devinLiveMap, devinRows, defModels] = await Promise.all([
+    agentProjects(), readConfig(), liveClaudeSessionIds(), liveAgySessions(), listAgySummaries(), liveDevinSessions(), listDevinSessions(), readDefaultAgentModels(),
   ]);
   // 若会话所用模型与本机当前默认模型一致（含代理网关对 deepseek-v4 默认模型的无后缀别名），resumeModel 置空 → 走原旧方式裸跑续接命令
   const normBase = (x) => String(x || '').replace(/\[[^\]]*\]$/, '');
@@ -2877,13 +2997,19 @@ async function agentSessions() {
     if (!arr) { arr = []; agyByCwd.set(r.cwd, arr); }
     arr.push(r);
   }
+  const devinByCwd = new Map();
+  for (const r of devinRows) {
+    let arr = devinByCwd.get(r.cwd);
+    if (!arr) { arr = []; devinByCwd.set(r.cwd, arr); }
+    arr.push(r);
+  }
   const projects = [];
   await Promise.all((projData.projects || []).map(async (pj) => {
     const sessions = [];
     // ① Claude Code 会话
     const dir = path.join(CLAUDE_PROJ, mungeClaudeDir(pj.path));
     let entries = [];
-    try { entries = await fsp.readdir(dir); } catch { entries = []; } // 纯 Antigravity 项目无 Claude 目录，继续合并
+    try { entries = await fsp.readdir(dir); } catch { entries = []; } // 纯 Antigravity / Devin 项目无 Claude 目录，继续合并
     if (entries.length) {
       const files = [];
       await Promise.all(entries.filter((n) => n.endsWith('.jsonl')).map(async (n) => {
@@ -2923,6 +3049,18 @@ async function agentSessions() {
         });
       } catch { /* */ }
     }));
+    // ③ Devin CLI 会话
+    const devinList = (devinByCwd.get(pj.path) || []).slice(0, 50);
+    for (const r of devinList) {
+      const open = devinLiveMap.has(r.id);
+      const status = open ? decideDevinSessionStatus(r, activeWindowMs, now) : null;
+      const resumeModel = r.model && !isSameModel(r.model, defModels.devinDef) ? r.model : '';
+      sessions.push({
+        id: r.id, agent: 'devin', title: r.title, name: names[r.id] || '', model: r.model || '', resumeModel,
+        lastT: r.lastT, userMsgs: r.userMsgs,
+        open, status,
+      });
+    }
     if (!sessions.length) return;
     sessions.sort((a, b) => b.lastT - a.lastT);
     const trimmed = sessions.slice(0, 50);
@@ -2935,6 +3073,8 @@ async function agentSessions() {
     newCmd: cfg.sessionNewCmd || SESS_NEW_DEFAULT,
     agyResumeCmd: cfg.agyResumeCmd || SESS_AGY_RESUME_DEFAULT,
     agyNewCmd: cfg.agyNewCmd || SESS_AGY_NEW_DEFAULT,
+    devinResumeCmd: cfg.devinResumeCmd || SESS_DEVIN_RESUME_DEFAULT,
+    devinNewCmd: cfg.devinNewCmd || SESS_DEVIN_NEW_DEFAULT,
     activeWindowMs,
     projects,
   };
