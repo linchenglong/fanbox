@@ -7,7 +7,7 @@
 ## 与上游共存的约定
 
 - 所有二开代码块用 `==== 二开` 注释围起（`grep -an "==== 二开" server.js public/app.js public/style.css electron/main.js electron/preload.js electron/wechat/env.js` 六个文件全量认领；**必须 `-a`**——`public/app.js` 有 7 个上游遗留的 NUL 字节，不带会被当二进制跳过）
-- 上游冲突面实测（2026-10-12，干跑合并上游 2.17.0，落后 42 个提交）：只有 `public/app.js`、`public/style.css`、`package-lock.json` 冲突，`server.js`/`electron/main.js`/`electron/preload.js` 自动合并。干跑命令：`git merge-tree --write-tree --name-only master upstream/master`
+- 上游冲突面实测（2026-11-16，干跑合并上游 2.17.1，落后 43 个提交）：只有 `public/app.js`、`public/style.css`、`package-lock.json` 冲突，`server.js`/`electron/main.js`/`electron/preload.js`/`public/index.html`/`public/i18n-dict.js` 全部自动合并。干跑命令：`git merge-tree --write-tree --name-only master upstream/master`
 - 文件区/预览等上游功能**隐藏不删**（`display:none`），代码照常运行——换取 merge 上游时的最小冲突面
 - 控制台 `fbCockpit(false)` 随时切回上游原版三栏布局
 
@@ -100,7 +100,7 @@
 - **验证**：真实 PTY 对照（模拟 Apple_Terminal 启动）——改前子进程 `TERM_PROGRAM=Apple_Terminal`/版本 `455`，改后 `fanbox`/空，login shell 的启动文件不会改回；`env.js` 的 `fullEnv()` 直接实测。**只对重启后新开的终端生效**，运行中的 tab 环境已定
 - **未实证**：「空终端不再弹」本身是随机现象，需长期观察
 
-### 13. Antigravity (`agy`) 双引擎驾驶舱接入
+### 13. v1.4.0 Antigravity (`agy`) 双引擎驾驶舱接入（6f1eec9）
 
 - **同树混排与项目归属**：`agentProjects` / `agentSessions` 同时聚合 Claude Code（`~/.claude/projects/**/*.jsonl`）与 Google Antigravity CLI（`~/.gemini/antigravity-cli/conversation_summaries.db` SQLite WAL 权威索引，排除 `nesting_depth>0` 子会话及单会话 `.db` 已删的孤儿摘要），同一 `cwd` 下的两家会话按 `lastT` 降序混排。同时剔除 `/tmp`、`/private/var/folders` 等系统临时目录（防评测/网关无头会话挤占 20 个项目名额）
 - **WAL 感知缓存**：`sqliteDbSig` 同时校验 `.db` 与 `.db-wal` 的 `size + mtimeMs`，未写入时 0ms 命中内存缓存；冷读 `sqlite3 -json` 约 14ms
@@ -109,20 +109,20 @@
 - **视觉区分与分流调度**：状态圆点专职表达运行四态，紧邻其右放置 13px 官方引擎图标（Claude 琥珀星芒 `claude.svg` / Antigravity 谷歌四色飞翼 `agy.svg`，闭合态降透明度退居二线，打开态全彩高亮；顶栏挂会话的 tab 同步替换为对应引擎图标）。点击未打开会话按 `agent` 自动分流执行 `sessionResumeCmd`（默认 `claudex -r {id}`）或 `agyResumeCmd`（默认 `agy --conversation {id}`）；项目行右侧 `＋` 升级为新建 Claude / Antigravity 二选一菜单；`AGENT_REGISTRY` 同步内置 `agy`
 - **配套 `~/bin/agy` 最高权限包装**：对交互会话与单次任务默认注入 `--dangerously-skip-permissions`（管理类子命令 `update`/`mcp`/`models` 等及已显式传参时自动豁免）
 
-### 14. 终端内点击文件 → 按 Tab 隔离的右侧文件展开区
+### 14. v1.4.0 终端内点击文件 → 按 Tab 隔离的右侧文件展开区（6f1eec9）
 
 - **架构归属（Tab = 左终端 + 右专属文件区）**：`applyCockpit(true)` 动态挂载 `#term-body` 包裹 `#xterm-host`，并将上游现成的 `#preview-resizer` + `#preview` 迁入 `#term-body` 右侧（位于 `.term-head` Tab 栏正下方；`public/index.html` 零改动，`fbCockpit(false)` 随时原样迁回 `#filemgmt`），100% 零拷贝复用上游 Markdown 富文本/排版、HTML 实时预览、Monaco 代码编辑、CSV 表格、图片灯箱、PDF 与选中文字甩回终端等全套能力
 - **按 Tab 状态隔离（`cockpitPreview`）**：每个终端 Tab 独立持有 `s.cockpitFile`。在 Tab 3 点击路径在右侧展开文件 A → 切换到未开文件的 Tab 2 时自动保存改动并瞬切收起右侧、终端自适应铺满全宽 → 切回 Tab 3 自动恢复文件 A；点右上角 `✕` 或按 `Esc` 仅解绑当前 Tab 的文件，不影响其它 Tab
 - **链接识别与打开增强**：在 xterm `registerLinkProvider` 基础上补充 `file://` URI 识别；`openTermPath` 支持 `file://` 解码、`:line(:col)` / `#Lline` 行号提取（Monaco 自动居中跳行），基准目录优先取点击所属 Tab 自身的实时工作目录，驾驶舱下直出单文件预览（`/api/locate` 附带 `entry` 元信息）不篡改全局面包屑目录；打开/恢复预览时不抢夺左侧终端键盘焦点；分栏拖拽分隔条为跨骑分界线的 9px 热区，宽度记忆在 `localStorage` `fb_cockpit_pvw`（默认占 46% 宽）
 
-### 15. Office 三件套原地预览（`xlsx/xls` · `docx/doc` · `pptx/ppt`）
+### 15. v1.4.0 Office 三件套原地预览（6f1eec9）
 
 - **零 npm 依赖后端解析（`/api/office`）**：基于 Node 内置 `zlib.inflateRawSync` 实现 OOXML 内存 ZIP 读取器（60MB 内存护栏）
   - **Excel**：`.xlsx` 直解 `sharedStrings`、`styles`（Excel 日期序列号自动还原为 `YYYY-MM-DD`）、`workbook` 多 Sheet 映射，大表借 `<dimension>` 秒取总行数并截取前 500 行 × 80 列（29MB 9-Sheet 表实测数十毫秒）；老版 `.xls` 走 `python3 -I` `xlrd` 兜底。前端渲染多 Sheet 胶囊切换栏 + 吸顶冻结表头网格表
   - **Word**：`.docx` 栈式扫描 `<w:body>` 还原标题层级、粗斜下划线、超链接、嵌套表格及 `word/media/*` 内嵌图片（单图≤4MB、总图≤16MB Base64 嵌入，支持点击灯箱滚轮放大）；`.doc` 走 macOS `/usr/bin/textutil -convert html` 并剥除死黑字色适配暗色主题
   - **PPT**：优先调用本机 LibreOffice `soffice --headless`（独立临时 `UserInstallation` 防桌面实例锁冲突）转原版排版 PDF 缓存至 `~/.fanbox/thumbs/office-<sha1>.pdf`（首开 ~4s，二次缓存 1ms）；未装 LibreOffice 时降级为纯 Node 解析 `ppt/slides/*` 16:9 图文卡片流
 
-### 16. 会话原模型记忆续接 + 重启自动原位恢复 Tab
+### 16. v1.4.0 / v1.4.1 会话原模型记忆续接 + 重启自动原位恢复 Tab（6f1eec9, f8ee836）
 
 - **双引擎最后使用模型解析（`server.js`）**：
   - **Claude Code**：`parseClaudeSession` 仅采信客户端侧 `attachment.identity.modelId` 与 `/model` 本地回执 `Set model to \`...\``（完整保留渠道前缀与 `[1m]` 1M 上下文后缀；**禁用**网关回包 `assistant.message.model` 兜底——代理网关回包会剥掉 `[1m]` 并改写为后端底层名如 `deepseek-v4-flash`）
@@ -132,14 +132,14 @@
 - **快照升级（`persistTabs` / `restore`）**：`localStorage` `fb_term_tabs` 持久化每个活 Tab 的 `{ cwd, sid, agent, model, title, file }`（上限 16 个标签，还原期间挂 `_restoring` 锁）；重启后第 0 帧恢复标题、引擎图标与右侧关联文件，排除外部终端已开会话后原位自动续接，并给足 25s 启动宽限期
 - **顺手加固 PTY 污染变量清理**：跟进 Claude Code v2.1.303，在 `pty:spawn` 与 `~/bin/fanbox` 补充剥离 `CLAUDE_CODE_CHILD_SESSION`、`CLAUDE_CODE_SESSION_ATTENDED`、`CLAUDE_CODE_MESSAGING_*`、`CLAUDE_PID`，根绝 `Transcript saving is off`
 
-### 17. 定向摘入上游三项核心修复（来自 v2.14.0 / v2.15.0 / v2.17.1）
+### 17. v1.4.0 定向摘入上游三项核心修复（6f1eec9）
 
 未整包合并上游 UI 改版，仅按上游原文逐字移植三项纯收益修复（保持与上游代码一致，方便后续 merge 自动消解）：
-- **快照硬门与空间清理（`62115f0`）**：修复 `commit` 超时被当成「无变化」导致孤立对象堆积与未备份误回滚；启动自动清理 0 快照失效影子仓库（`snapReapAll`）；缩略图生成后 5s 合批裁剪（`pruneThumbsSoon`，按磁盘块计）；存档面板增加总占用/当前项目占用显示与一键清理（驾驶舱在右上角 `⚙` 设置面板补充「回合存档与空间清理」入口）
-- **豆包等中文输入法标点修复（`2ec28c6` #66）**：单字符标点在 `keydown` 挂起改由 `keypress`/`input` 发出（`keyup` 兜底补发），解决不走组合态的中文输入法输出 `，。` 被键位英文 `, .` 顶掉的问题
-- **Markdown 本地图片渲染内存降 11 倍（`eb35a9a`）**：新增 `thumbUrl`/`canThumb`/`displayImgWidth` 与 `#preview-body` 二段式 `thumb → /fs/` 兜底，以及 `/api/thumb` ETag 304 协商缓存（排版导出仍走原图，图注无损保留已在 v2.8.0 基线内）
+- **快照硬门与空间清理（源自上游 `62115f0`）**：修复 `commit` 超时被当成「无变化」导致孤立对象堆积与未备份误回滚；启动自动清理 0 快照失效影子仓库（`snapReapAll`）；缩略图生成后 5s 合批裁剪（`pruneThumbsSoon`，按磁盘块计）；存档面板增加总占用/当前项目占用显示与一键清理（驾驶舱在右上角 `⚙` 设置面板补充「回合存档与空间清理」入口）
+- **豆包等中文输入法标点修复（源自上游 `2ec28c6` #66）**：单字符标点在 `keydown` 挂起改由 `keypress`/`input` 发出（`keyup` 兜底补发），解决不走组合态的中文输入法输出 `，。` 被键位英文 `, .` 顶掉的问题
+- **Markdown 本地图片渲染内存降 11 倍（源自上游 `eb35a9a`）**：新增 `thumbUrl`/`canThumb`/`displayImgWidth` 与 `#preview-body` 二段式 `thumb → /fs/` 兜底，以及 `/api/thumb` ETag 304 协商缓存（排版导出仍走原图，图注无损保留已在 v2.8.0 基线内）
 
-### 18. Antigravity (`agy`) 专版阅读优化（与 Claude Code 物理隔离）
+### 18. v1.5.0 Antigravity (`agy`) 专版阅读优化（324bd83, 044c322）
 
 - **问题**：`agy` TUI 块间不留空行，在 `lineHeight: 1.2` 下上下紧贴，且思考灰字易被亮色背景垫图干扰
 - **专版隔离实现（`term.applyAgentStyle` + `.xterm-instance.is-agy`）**：严格仅对 `sessionAgent === 'agy'` 的终端实例生效，Claude Code 与裸 shell 首行幂等跳过、零触碰（且因 `lineHeight` 不同，xterm WebGL 自动分配独立 `TextureAtlas` 不与 Claude 标签共享）：
@@ -157,7 +157,7 @@
 
 ```bash
 # 服务端数据
-curl -s http://127.0.0.1:4567/api/agent-sessions | jq '.projects[].sessions[] | {id, open, status}'
+curl -s http://127.0.0.1:4567/api/agent-sessions | jq '.projects[].sessions[] | {id, agent, model, resumeModel, open, status}'
 # UI 实测：带 CDP 启动，Playwright connect_over_cdp 驱动真实 App
 fanbox   # ~/bin/fanbox 启动器，已带 --remote-debugging-port=9223；停止 fanbox stop，日志 fanbox log
 ```
