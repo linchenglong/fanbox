@@ -80,8 +80,18 @@ function createWindow() {
 
   // 外部链接走系统浏览器，不在 app 里开新窗口
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/.test(url)) { shell.openExternal(url); return { action: 'deny' }; }
+    if (/^https?:/i.test(url)) { shell.openExternal(url); return { action: 'deny' }; }
     return { action: 'allow' };
+  });
+  // ==== 二开: 兜底「先开空白窗再改 location.href」的外部链接，防止在应用内弹浏览器窗 ====
+  win.webContents.on('did-create-window', (childWin) => {
+    childWin.webContents.on('will-navigate', (e, url) => {
+      if (/^https?:/i.test(url)) {
+        e.preventDefault();
+        shell.openExternal(url);
+        if (!childWin.isDestroyed()) childWin.close();
+      }
+    });
   });
 
   win.on('closed', () => { win = null; });

@@ -3561,6 +3561,8 @@ const player = {
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-term').trim() || 'monospace',
       fontSize: 14, lineHeight: 1.2, cursorBlink: false, theme: (term.themes[this.recTheme] || term.theme()), scrollback: 0,
       allowProposedApi: true, minimumContrastRatio: 4.5, cols, rows,
+      // ==== 二开: OSC 8 超链接接管 ====
+      linkHandler: term.oscLinkHandler(),
     });
     if (!window.__noUnicode11 && window.Unicode11Addon) {
       try { const U = window.Unicode11Addon.Unicode11Addon || window.Unicode11Addon; x.loadAddon(new U()); x.unicode.activeVersion = '11'; } catch { /* */ }
@@ -4125,6 +4127,26 @@ const term = {
     }
     window.fanboxPty.input(id, d);
   },
+  // ==== 二开: 接管终端 OSC 8 超链接 —— http/https 直呼系统默认浏览器（无 confirm 弹窗），file:// 交给右侧预览 ====
+  oscLinkHandler(id) {
+    return {
+      allowNonHttpProtocols: !!id,
+      activate: (ev, uri, range) => {
+        const u = String(uri || '').trim();
+        let parsed;
+        try { parsed = new URL(u); } catch { return; }
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          window.open(u, '_blank', 'noopener');
+          return;
+        }
+        if (parsed.protocol === 'file:' && id) {
+          const hash = /^#L\d+/i.test(parsed.hash) ? parsed.hash : '';
+          const fileUri = 'file://' + parsed.pathname + hash;
+          this.openTermPath(id, fileUri, '', range && range.end ? range.end.y - 1 : undefined);
+        }
+      },
+    };
+  },
   // 点终端里的文件名/路径 → 结合 cwd + 回扫 scrollback + 搜索定位真实文件，在翻箱里打开
   // tail：路径在该逻辑行里的后续文本，服务端用它做「空格扩展」stat 验证（带空格的文件名靠它补全）
   // rowHint：点击处逻辑行的末物理行号（buffer 绝对行），回扫 scrollback 的起点
@@ -4256,6 +4278,8 @@ const term = {
       // ==== 二开: 滚轮一格多滚几行（默认 3 倍≈9 行/格），Alt+滚轮再加速 5 倍翻长输出
       scrollSensitivity: Number(localStorage.getItem('fb_term_scroll')) || 3,
       fastScrollSensitivity: 5, // 按住 Alt 滚 = scrollSensitivity × 5
+      // ==== 二开: OSC 8 超链接接管 ====
+      linkHandler: this.oscLinkHandler(id),
     });
     const fit = FitCtor ? new FitCtor() : null;
     if (fit) xterm.loadAddon(fit);
