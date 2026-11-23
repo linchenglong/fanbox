@@ -168,6 +168,12 @@
   - **滚轮翻历史**仍走 `wheel` 捕获器合成 SGR 滚轮上报发给 `tmux`，并顺手清掉翻屏前的旧选区防残影
   - `applyAgentStyle` 同步维护 `.is-devin` 类，`style.css` 将 `.xterm-instance.is-devin .xterm.enable-mouse-events` 的光标从死箭头恢复为文本 I 型光标
 
+### 22. v1.6.3 终端 OSC 8 超链接接管与空白窗外部跳转兜底（f8f1314）
+
+- **根因**：xterm 内置 `OscLinkProvider` 优先级高于 FanBox 的 `registerLinkProvider`，未配置 `linkHandler` 时遇到 Antigravity/Devin 输出的 OSC 8 超链接会走 `defaultActivate`——先弹 `confirm` 警告框，确认后调用无参 `window.open()`（Electron `setWindowOpenHandler` 收到 `about:blank` 放行开新窗，随后 `newWindow.location.href = uri` 直接在应用内打开网页而非系统默认浏览器）
+- **前端接管（`term.oscLinkHandler(id)`）**：实时终端 `newTab`（`allowNonHttpProtocols: true`）与回放终端 `buildTerm`（仅放行 `http`/`https`）统一配置 `linkHandler`；`http:`/`https:` 直接 `window.open(u, '_blank', 'noopener')` 走 `shell.openExternal` 唤起系统默认浏览器，实时标签的 `file://` 经 `new URL` 清洗宿主机名及非 `#L` 片段后交给 `openTermPath` 在右侧预览，其余协议一律拦截
+- **主进程兜底（`electron/main.js`）**：`setWindowOpenHandler` 正则补 `/i`，并新增 `did-create-window` 监听子窗口 `will-navigate`——若空白新窗试图跳向 `http(s)://`，立即拦截转 `shell.openExternal` 并关闭子窗口
+
 ## 已知限制
 
 - xterm canvas 渲染与 CoreText 存在先天字形差异，字重 500 追回约九成观感

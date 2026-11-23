@@ -31,6 +31,7 @@ grep -an "==== 二开" server.js public/app.js public/style.css electron/main.js
 | 四态状态圆点（侧栏+tab 同源） | `decideSessionStatus`（Claude）/ `decideAgySessionStatus`（Agy）/ `decideDevinSessionStatus`（Devin） | `SESS_STATUS`、`.sess-dot.st-*`、`.tab-dot.st-*` |
 | open 探活 / 防双开 | `liveClaudeSessionIds`、`liveAgySessions`、`liveDevinSessions`（`session_locks`）、`/api/session-host` | `refreshSessionOpenState`、`openSession` 三级判定 |
 | tab 会话名标题 / 引擎标 / 置顶 | — | `syncSessTabTitles`、`.tab-agent-ic`、`adoptByHost`（反向认领）、`togglePinSession`（⋯ 菜单） |
+| 终端 OSC 8 超链接直开外部浏览器 | electron `did-create-window` 外部跳转兜底 | app.js `oscLinkHandler`（`http`/`https` 无弹窗唤起系统浏览器，`file://` 走 `openTermPath`） |
 | 输入框 ↑/↓ 边界移动 & 点击落光标 | — | app.js `locateInputBox`/`arrowBoundary`/`bindInputClick`（三引擎 `❯`/`❭`/`>` + 顶底边框夹持 + 剔除暗灰 Placeholder + 点击闭环定位） |
 | Devin 鼠标点击/划词保护 | — | app.js `isDevinMouseGuard`/`bindDevinMouseGuard` + style.css `.is-devin`（拦截 tmux `mouse on` 吞点击与松手弹回输入框，保留滚轮翻页） |
 | 蓝莓皮肤 Adeberry | — | `[data-theme="adeberry"]`（色值源自 Warp 官方） |
