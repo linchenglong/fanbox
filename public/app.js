@@ -4291,6 +4291,7 @@ const term = {
           sess._wheelAcc -= lines;
           if (mouseOn) {
             // ② 合成 SGR(1006) 滚轮上报：64=上滚 65=下滚，坐标取鼠标所在单元格（现代 TUI 全用 SGR）
+            if (xterm.hasSelection()) xterm.clearSelection(); // 滚屏后选区坐标会错位，顺手清掉防残影
             const rect = host.getBoundingClientRect();
             const col = Math.min(xterm.cols, Math.max(1, Math.floor((ev.clientX - rect.left) / cellW) + 1));
             const row = Math.min(xterm.rows, Math.max(1, Math.floor((ev.clientY - rect.top) / cellH) + 1));
@@ -4405,6 +4406,7 @@ const term = {
 
     // ==== 二开: 点击终端输入框任意位置移动光标（覆盖 Claude Code / Antigravity / Devin）====
     this.bindInputClick(sess);
+    this.bindDevinMouseGuard(sess);
 
     // 右键菜单：复制/粘贴
     host.addEventListener('contextmenu', (e) => {
@@ -4860,6 +4862,36 @@ const term = {
       this.input(sess.id, vSeq);
     }, true);
   },
+  // ==== 二开: Devin 鼠标点击/划词保护 —— ~/bin/devin 为渲染底部状态栏包了一层 tmux（set -g mouse on），
+  // 会触发 xterm 的 mouseTrackingMode="drag"：原生划词被禁用，左键点击/拖拽/双击全被 tmux copy-mode 吃掉，
+  // 松手触发 copy-pipe-and-cancel 瞬间弹回底部输入框，且右键还会弹出 tmux 文本菜单。
+  // Devin CLI 自身不依赖鼠标点击（只靠 tmux 接管滚轮翻历史），因此在 Devin 标签下强制走 xterm 原生选择，
+  // 仅保留 wheel 走上方 SGR 滚轮上报链路，点击/划词/复制/链接/输入框落光标全数恢复正常。
+  isDevinMouseGuard(sess, xterm) {
+    if (!sess || sess.dead || !xterm) return false;
+    if (sess.sessionAgent === 'devin') return true;
+    try {
+      const buf = xterm.buffer.active;
+      const last = buf.getLine(buf.baseY + xterm.rows - 1);
+      if (last && /^\[devin\]\s/.test(last.translateToString(true).trimStart())) {
+        if (sess.host && !sess.host.classList.contains('is-devin')) sess.host.classList.add('is-devin');
+        return true;
+      }
+    } catch { /* */ }
+    return false;
+  },
+  bindDevinMouseGuard(sess) {
+    if (!sess || !sess.xterm) return;
+    const xterm = sess.xterm;
+    const sel = xterm._core && xterm._core._selectionService;
+    if (!sel || typeof sel.shouldForceSelection !== 'function' || sel._fbDevinGuarded) return;
+    const origForce = sel.shouldForceSelection.bind(sel);
+    sel._fbDevinGuarded = true;
+    sel.shouldForceSelection = (ev) => {
+      if (this.isDevinMouseGuard(sess, xterm)) return true;
+      return origForce(ev);
+    };
+  },
   // 轮到你了：终端边缘呼吸几秒，余光可感（agent 干完一段、把球踢回给你）
   awaitGlow() {
     const p = $('#terminal-panel');
@@ -5008,6 +5040,7 @@ const term = {
     if (!s || !s.xterm || !s.host) return;
     const ag = agentHint || s.sessionAgent;
     const isComfort = !s.dead && (ag === 'agy' || ag === 'devin');
+    s.host.classList.toggle('is-devin', !s.dead && ag === 'devin');
     if (!!s._agyStyled === isComfort) return; // 幂等：Claude Code / 裸 shell 首行即退，完全不碰 xterm 配置与图集
     s._agyStyled = isComfort;
     s.host.classList.toggle('is-agy', isComfort);
