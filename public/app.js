@@ -4127,11 +4127,20 @@ const term = {
     }
     window.fanboxPty.input(id, d);
   },
-  // ==== 二开: 接管终端 OSC 8 超链接 —— http/https 直呼系统默认浏览器（无 confirm 弹窗），file:// 交给右侧预览 ====
+  // ==== 二开: 接管终端 OSC 8 超链接 —— 仅左键触发（http/https 直呼系统默认浏览器，file:// 交给右侧预览），右键留给复制菜单 ====
   oscLinkHandler(id) {
     return {
       allowNonHttpProtocols: !!id,
+      hover: (_ev, uri) => {
+        const s = id && this.sessions.find((x) => x.id === id);
+        if (s) s._hoverLink = String(uri || '').trim();
+      },
+      leave: () => {
+        const s = id && this.sessions.find((x) => x.id === id);
+        if (s) s._hoverLink = '';
+      },
       activate: (ev, uri, range) => {
+        if (ev && ev.button !== 0) return; // xterm Linkifier 不区分鼠标键，右键/中键放给菜单不打开预览或浏览器
         const u = String(uri || '').trim();
         let parsed;
         try { parsed = new URL(u); } catch { return; }
@@ -4440,6 +4449,19 @@ const term = {
       if (hasSel) items.push({ label: '复制', fn: () => {
         try { navigator.clipboard.writeText(xterm.getSelection()); xterm.clearSelection(); } catch {}
       }});
+      // ==== 二开: 右键悬停在文件路径 / 超链接上时提供直接复制路径或链接（配合左键才打开预览的拦截）====
+      const rawLink = (sess._hoverLink || '').trim();
+      if (rawLink) {
+        const isUrl = /^https?:\/\//i.test(rawLink);
+        let copyVal = rawLink;
+        if (/^file:\/\//i.test(rawLink)) {
+          try { copyVal = decodeURIComponent(new URL(rawLink).pathname); }
+          catch { copyVal = rawLink.replace(/^file:\/\/(localhost)?/i, '').replace(/#.*$/, ''); }
+        }
+        items.push({ label: isUrl ? '复制链接' : '复制路径', fn: () => {
+          try { navigator.clipboard.writeText(copyVal); toast(isUrl ? '已复制链接' : '已复制路径'); } catch {}
+        }});
+      }
       items.push({ label: '粘贴', fn: () => term.pasteInto(xterm) });
       popupMenu(e, items);
     });
@@ -4502,7 +4524,13 @@ const term = {
               range: { start: { x: a.x, y: a.y }, end: { x: b.x + b.w - 1, y: b.y } },
               text: cand,
               decorations: { pointerCursor: true, underline: true },
-              activate: act || (() => this.openTermPath(id, cand, tail, endRow)),
+              hover: () => { sess._hoverLink = cand; },
+              leave: () => { if (sess._hoverLink === cand) sess._hoverLink = ''; },
+              // ==== 二开: 仅左键点击触发打开，右键留给复制菜单 ====
+              activate: (ev) => {
+                if (ev && ev.button !== 0) return;
+                return act ? act(ev) : this.openTermPath(id, cand, tail, endRow);
+              },
             });
           };
           let m;
