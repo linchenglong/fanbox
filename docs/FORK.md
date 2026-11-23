@@ -160,6 +160,14 @@
 - **↑/↓ 边界先归位再翻历史（`arrowBoundary`）**：三引擎统一支持——首行不在 `col 2` 时按 `↑` 先发 `\x01`（Ctrl+A）归首，末行不在真实 `eol` 时按 `↓` 先发 `\x05`（Ctrl+E）归尾，已在边界才放行原生键翻历史
 - **鼠标点击输入框指哪打哪（`bindInputClick` + `rowMoveSeq`）**：左键单击输入框（过滤拖拽选词、修饰键、上滚翻阅历史及 `.xterm-cursor-pointer` 文件路径链接）按 `.xterm-screen` 单元格网格定位：同行逐格识别 CJK 双宽字符并按半字吸附直接补发 `←`/`→`；跨行采用「先发 `↑`/`↓` 切到目标视觉行 → `onWriteParsed` 读取真实硬件落点列 → 再补水平 `←`/`→`」两段闭环，兼容硬换行与软折行零误差
 
+### 21. Devin 鼠标点击/划词保护（28c49ac）
+
+- **根因**：`~/bin/devin` 为渲染底部常驻状态栏包了一层 `tmux -L devin`（`~/.config/devin/statusline/tmux.conf` 开启 `set -g mouse on`）。Devin CLI 自身既不开 alt-screen 也不收鼠标事件（`alt=0 / m_*=0`），但 `tmux` 会把外层 xterm 切入 `mouseTrackingMode: 'drag'`——xterm 随之禁用原生 `SelectionService`，把所有左键点击、拖拽、双击与右键都转成 SGR 鼠标序列发给 `tmux`：拖拽/微动点击/双击进入 `tmux copy-mode` 后松手即触发默认 `copy-pipe-and-cancel`，立刻退出翻页并把画面与光标弹回底部输入框；且 `xterm.hasSelection()` 恒为 `false`（`⌘C` 变 SIGINT、右键还透传触发 tmux 文本菜单）
+- **改法（`isDevinMouseGuard` + `bindDevinMouseGuard`）**：在 Devin 标签（`sessionAgent === 'devin'` 或底行命中 `[devin] ` 状态栏，覆盖手动在裸 shell 敲 `devin` 的未认领窗口期）下，覆写该终端实例的 `_selectionService.shouldForceSelection` 返回 `true`：
+  - **鼠标点击/划词/双击/右键**全部回流 xterm 原生路径（不向 `tmux` 发 SGR 鼠标序列，原生划词自动复制、`⌘C` 与右键菜单、路径/URL 链接点击、输入框点击落光标全数恢复，且非 Devin 程序如 `vim`/`htop` 零影响）
+  - **滚轮翻历史**仍走 `wheel` 捕获器合成 SGR 滚轮上报发给 `tmux`，并顺手清掉翻屏前的旧选区防残影
+  - `applyAgentStyle` 同步维护 `.is-devin` 类，`style.css` 将 `.xterm-instance.is-devin .xterm.enable-mouse-events` 的光标从死箭头恢复为文本 I 型光标
+
 ## 已知限制
 
 - xterm canvas 渲染与 CoreText 存在先天字形差异，字重 500 追回约九成观感
