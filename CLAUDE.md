@@ -42,7 +42,7 @@ grep -an "==== 二开" server.js public/app.js public/style.css electron/main.js
 
 - `~/.fanbox/config.json`：`sessionResumeCmd`（默认 `claudex -r {id}`）、`sessionNewCmd`（默认 `claudex`）、`agyResumeCmd`（默认 `agy --conversation {id}`）、`agyNewCmd`（默认 `agy`）、`devinResumeCmd`（默认 `devin -r {id}`）、`devinNewCmd`（默认 `devin`）、`sessionNames`（改名 map）、`sessionActiveWindowMs`（running 活跃窗，默认 60000）
 - localStorage：`fb_cockpit`、`fb_cockpit_pvw`（终端右侧预览宽）、`fb_term_tabs`（含会话 ID/引擎/非默认模型/右侧文件的恢复快照）、`fb_term_font`（默认 PT Mono）、`fb_term_fontsize`（默认 18）、`fb_term_fontweight`（默认 500）、`fb_term_scroll`（滚速 1-15，默认 3）、`fb_term_bgimg`/`fb_term_bgmask`（垫图）、`fb_sess_pinned`（置顶）
-- 仓库外配套脚本（`~/bin/`）：`fanbox`（启停器，含 CDP 9223 + 清污染环境 + 修 spawn-helper）、`claudex`、`agy`（默认注入 `--dangerously-skip-permissions`）、`devin`（自适应内网代理 + 登录态兜底 + 默认注入 `--permission-mode dangerous --respect-workspace-trust false`）
+- 仓库外配套脚本（`~/bin/`）：`fanbox`（启停器，含 CDP 9223 + 清污染环境 + 修 spawn-helper）、`claudex`、`agy`（默认注入 `--dangerously-skip-permissions`）、`devin`（自适应内网代理 + 登录态兜底 + 默认注入 `--permission-mode dangerous --respect-workspace-trust false` + 交互会话外包 `tmux -L devin` 渲染 `~/.config/devin/statusline/tmux.conf` 状态栏）
 
 ## 踩坑警示（违反必翻车）
 
@@ -55,6 +55,7 @@ grep -an "==== 二开" server.js public/app.js public/style.css electron/main.js
 - **node-pty 的 `proc` 判不了「claude 在不在跑」**：claudex 包装脚本末行不带 `exec`，前台进程组长是 zsh，claude 活着 proc 也返回 `'zsh'`。判 claude 存亡用 `/api/session-host`（注册表+ps 探活）；`isPlainShell` 对挂会话标签的 tab 必须直接 false
 - **子进程的 `TERM_PROGRAM` 必须改写成 `fanbox`**（`pty:spawn` 与 `electron/wechat/env.js` 两个出口已做，新增子进程出口要照做）：从 Terminal.app 启动时它是 `Apple_Terminal`，claude 据此发通知前跑 `osascript tell application "Terminal"`，Terminal 没运行就被拉起 → 空终端随机弹出
 - **项目身份读会话文件头的 `cwd`，别信 `~/.claude/projects/` 的目录名**：目录名把每个汉字/符号压成 `-`（`BAA定位`/`BAA记忆` 同目录），按目录取 cwd 会吞项目、串会话。用 `sessionFileCwd(fp)`（`agentProjects`/`agentSessions` 已用；`projectMemory` 还没，见 FORK.md 已知限制）
+- **Devin 终端看到的 `alternate` + `mouseTrackingMode:'drag'` 来自外层 `tmux` 而非 Devin CLI**：`~/bin/devin` 为渲染底部状态栏套了 `tmux -L devin`（`set -g mouse on`），Devin 自身 `alt=0 / m_*=0`。`bindDevinMouseGuard` 把点击/划词/右键收归 xterm 原生选择，仅保留 `wheel` 走 SGR 上报给 `tmux` 翻历史——改鼠标/滚轮逻辑时勿拆断这条分工
 
 ## 验证习惯
 

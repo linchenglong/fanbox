@@ -7,7 +7,7 @@
 ## 与上游共存的约定
 
 - 所有二开代码块用 `==== 二开` 注释围起（`grep -an "==== 二开" server.js public/app.js public/style.css electron/main.js electron/preload.js electron/wechat/env.js` 六个文件全量认领；**必须 `-a`**——`public/app.js` 有 7 个上游遗留的 NUL 字节，不带会被当二进制跳过）
-- 上游冲突面实测（2026-11-16，干跑合并上游 2.17.1，落后 43 个提交）：只有 `public/app.js`、`public/style.css`、`package-lock.json` 冲突，`server.js`/`electron/main.js`/`electron/preload.js`/`public/index.html`/`public/i18n-dict.js` 全部自动合并。干跑命令：`git merge-tree --write-tree --name-only master upstream/master`
+- 上游冲突面实测（2026-11-23，干跑合并上游 2.17.1，落后 43 个提交）：只有 `public/app.js`、`public/style.css`、`package-lock.json` 冲突，`server.js`/`electron/main.js`/`electron/preload.js`/`public/index.html`/`public/i18n-dict.js` 全部自动合并。干跑命令：`git merge-tree --write-tree --name-only master upstream/master`
 - 文件区/预览等上游功能**隐藏不删**（`display:none`），代码照常运行——换取 merge 上游时的最小冲突面
 - 控制台 `fbCockpit(false)` 随时切回上游原版三栏布局
 
@@ -148,7 +148,7 @@
 
 ### 19. v1.6.0 Devin CLI (`devin`) 三引擎驾驶舱接入 + 同款阅读优化（1de39ad）
 
-- **配套 `~/bin/devin` 最高权限启动器**：探测 `~/.local/bin/devin` 与 `/Applications/Devin.app/.../bin/devin`；办公网自动挂接 `HTTP_PROXY` + 内网 `NO_PROXY`（离网直连不卡死）；校验 `~/.local/share/devin/credentials.toml` 登录态（缺失自动引导 `devin auth login`）；对非管理子命令默认注入 `--permission-mode dangerous --respect-workspace-trust false`（`agent_mode="bypass"` 全工具免审批 + 免新目录信任拦截），并在 `~/.config/devin/config.json` 同步固化 `permission_mode: "dangerous"`、`skip_workspace_trust: true`、`skip_home_directory_warning: true`
+- **配套 `~/bin/devin` 最高权限启动器**：探测 `~/.local/bin/devin` 与 `/Applications/Devin.app/.../bin/devin`；办公网自动挂接 `HTTP_PROXY` + 内网 `NO_PROXY`（离网直连不卡死）；校验 `~/.local/share/devin/credentials.toml` 登录态（缺失自动引导 `devin auth login`）；对非管理子命令默认注入 `--permission-mode dangerous --respect-workspace-trust false`（`agent_mode="bypass"` 全工具免审批 + 免新目录信任拦截），并在 `~/.config/devin/config.json` 同步固化 `permission_mode: "dangerous"`、`skip_workspace_trust: true`、`skip_home_directory_warning: true`；交互式会话外包一层 `tmux -L devin`（`~/.config/devin/statusline/tmux.conf`）渲染底部常驻状态栏（鼠标保护见第 21 节）
 - **三引擎同树混排与 WAL 缓存**：`listDevinSessions` 读取 `~/.local/share/devin/cli/sessions.db`（`hidden = 0`，秒级时间戳转毫秒，标题取 `title > prompt_history > 首条用户输入`，共用 `sqliteDbSig` 校验 `.db + .db-wal` 零成本命中缓存），与 Claude Code、Antigravity 按 `lastT` 降序同树混排
 - **探活、防双开与四态对齐**：活着的 `devin acp` 子进程持有 `~/.local/share/devin/cli/session_locks/<slug>.lock` 打开句柄；`liveDevinSessions` 用 `pgrep -x devin` + `lsof` 定向反查 `<slug> → pid`，`sessionHost` 读子进程及父进程 REPL 的 `FANBOX_TERM_ID` 完成本地 tab 配对与外部终端防双开；`decideDevinSessionStatus` 结合末条有效消息与 `tool_call_state` 未完结工具判定 `waiting`（`ask_user_question`）/ `running` / `done`
 - **原模型续接与同款舒适排版（含动态行高 WebGL 花屏根治）**：读取 `~/.config/devin/config.json` 默认 `agent.model`，仅非默认模型会话追加 `--model '<model>'`（默认模型走裸 `devin -r {id}`）；内置官方矢量图标 `/assets/agents/devin.svg`、项目行 `＋` 三选一新建菜单与顶栏 `AGENT_REGISTRY` 一键启动按钮；终端实例与 Antigravity 共用 `term.applyAgentStyle`（`lineHeight: 1.42` + `.is-agy` 垫图 28% 柔暗；切换 `lineHeight` 时完整 `dispose` 并重装该标签的 `WebglAddon`——修复 xterm `_handleOptionsChanged` 漏调 `GlyphRenderer.setDimensions` 引发的顶点/贴图错位花屏，同时保留 WebGL 逐格绝对坐标绘制，避免 DOM 渲染器 `letter-spacing` 导致的打字松散与行尾裁字）
@@ -160,7 +160,7 @@
 - **↑/↓ 边界先归位再翻历史（`arrowBoundary`）**：三引擎统一支持——首行不在 `col 2` 时按 `↑` 先发 `\x01`（Ctrl+A）归首，末行不在真实 `eol` 时按 `↓` 先发 `\x05`（Ctrl+E）归尾，已在边界才放行原生键翻历史
 - **鼠标点击输入框指哪打哪（`bindInputClick` + `rowMoveSeq`）**：左键单击输入框（过滤拖拽选词、修饰键、上滚翻阅历史及 `.xterm-cursor-pointer` 文件路径链接）按 `.xterm-screen` 单元格网格定位：同行逐格识别 CJK 双宽字符并按半字吸附直接补发 `←`/`→`；跨行采用「先发 `↑`/`↓` 切到目标视觉行 → `onWriteParsed` 读取真实硬件落点列 → 再补水平 `←`/`→`」两段闭环，兼容硬换行与软折行零误差
 
-### 21. Devin 鼠标点击/划词保护（28c49ac）
+### 21. v1.6.2 Devin 鼠标点击/划词保护（28c49ac）
 
 - **根因**：`~/bin/devin` 为渲染底部常驻状态栏包了一层 `tmux -L devin`（`~/.config/devin/statusline/tmux.conf` 开启 `set -g mouse on`）。Devin CLI 自身既不开 alt-screen 也不收鼠标事件（`alt=0 / m_*=0`），但 `tmux` 会把外层 xterm 切入 `mouseTrackingMode: 'drag'`——xterm 随之禁用原生 `SelectionService`，把所有左键点击、拖拽、双击与右键都转成 SGR 鼠标序列发给 `tmux`：拖拽/微动点击/双击进入 `tmux copy-mode` 后松手即触发默认 `copy-pipe-and-cancel`，立刻退出翻页并把画面与光标弹回底部输入框；且 `xterm.hasSelection()` 恒为 `false`（`⌘C` 变 SIGINT、右键还透传触发 tmux 文本菜单）
 - **改法（`isDevinMouseGuard` + `bindDevinMouseGuard`）**：在 Devin 标签（`sessionAgent === 'devin'` 或底行命中 `[devin] ` 状态栏，覆盖手动在裸 shell 敲 `devin` 的未认领窗口期）下，覆写该终端实例的 `_selectionService.shouldForceSelection` 返回 `true`：
